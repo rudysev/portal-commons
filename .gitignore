@@ -1,0 +1,21 @@
+.gradle/
+build/
+*.iml
+.idea/
+local.properties
+.DS_Store
+.cursorrules
+.claude/
+
+# Secrets / local config — never commit (defensive; none exist in the repo today)
+.env
+.env.*
+!.env.example
+*.local
+config.local.json
+secrets.properties
+*.keystore
+*.jks
+*.pem
+*.p12
+*.key
