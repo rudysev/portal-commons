@@ -22,6 +22,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
+    testOptions {
+        // Use the bundled org.json (testImplementation) instead of android.jar's throwing stubs, so the
+        // Vosk-JSON parser (WakeRecognizer.parseResult) can be exercised in plain JVM unit tests.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {
@@ -32,5 +38,8 @@ kotlin {
 
 dependencies {
     implementation(project(":commons")) // PcmDevice seam + PcmCaptureFormat
+    // On-device wake-word recognition (WakeRecognizer/WakeMicEngine) — free, keyless, offline, no GMS.
+    implementation("com.alphacephei:vosk-android:0.3.75")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303") // real org.json for the WakeRecognizer.parseResult test
 }
