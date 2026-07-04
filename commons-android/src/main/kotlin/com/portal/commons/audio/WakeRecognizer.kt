@@ -6,6 +6,7 @@ import com.portal.commons.audio.WakeMatcher.RecWord
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
+import java.io.File
 
 /**
  * On-device multi-wake recognizer using **Vosk** (free, keyless, offline).
@@ -23,13 +24,18 @@ class WakeRecognizer(
     initialWakeWords: List<WakeWord>,
     private val onReady: () -> Unit,
     private val onUnavailable: () -> Unit,
+    // Where the Vosk model comes from. null (default) = bundled `assets/[MODEL_ASSET]`, unpacked to filesDir
+    // (portal-wake). A non-null dir = an already-unpacked model on disk, loaded directly — for a consumer that
+    // **downloads** the model at runtime instead of shipping it in the APK (portal-assistant on gen2). If the
+    // dir isn't a real model (no `am/`), [onUnavailable] fires, same as a missing asset.
+    modelDir: File? = null,
 ) {
     @Volatile private var model: Model? = null
 
     @Volatile private var recognizer: Recognizer? = null
 
     // Closed before the async model load finished? The unpack callback honours this and frees rather than
-    // assigning, so a teardown that races the load can't orphan a freshly-built (~128 MB) model + recognizer.
+    // assigning, so a teardown that races the load can't orphan a freshly-built model + recognizer.
     @Volatile private var closed = false
 
     // The live wake set. Mutable because [rebuildGrammar] swaps the grammar in place (on a plugin
@@ -56,42 +62,73 @@ class WakeRecognizer(
     }
 
     init {
-        // Unpack + load the model off the caller's thread; builds + warms the recognizer, then signals.
+        // Load the model off the caller's thread; builds + warms the recognizer, then signals. Two sources:
+        // a downloaded dir (loaded directly) or the bundled asset (unpacked to filesDir) — see [modelDir].
         try {
-            org.vosk.android.StorageService.unpack(
-                context,
-                MODEL_ASSET,
-                MODEL_TARGET,
-                { m ->
-                    // A close() that landed while the load was in flight: free the model instead of
-                    // assigning it — nothing else holds a reference, so this is the only path that frees it.
-                    if (closed) {
-                        runCatching { m.close() }
-                        return@unpack
-                    }
-                    model = m
-                    val rec = buildRecognizer(m) // builds + warms up; null if grammar/recognizer init fails
-                    // Re-check: close() can land while buildRecognizer runs. If so, free what we just built.
-                    if (closed) {
-                        runCatching { rec?.close() }
-                        runCatching { m.close() }
-                        model = null
-                        return@unpack
-                    }
-                    recognizer = rec
-                    if (rec != null) onReady() else onUnavailable()
-                },
-                { onUnavailable() },
-            )
+            if (modelDir != null) loadFromDir(modelDir) else unpackFromAssets(context)
         } catch (
             @Suppress("SwallowedException")
             t: Throwable,
         ) {
-            // The throwable is intentionally swallowed: don't let a model-unpack / native-init failure crash
-            // the service. This class is deliberately log-free (see KDoc); by contract any init failure is
-            // surfaced as the onUnavailable() signal, which the owning engine's consumer logs.
+            // The throwable is intentionally swallowed: don't let a model-load / native-init failure crash the
+            // service. This class is deliberately log-free (see KDoc); by contract any init failure is surfaced
+            // as the onUnavailable() signal, which the owning engine's consumer logs.
             onUnavailable()
         }
+    }
+
+    /**
+     * Commit a freshly-loaded [Model]: build + warm the recognizer, then signal [onReady]/[onUnavailable].
+     * Honours a [close] that raced the (async) load by **freeing** rather than assigning — nothing else holds
+     * the model, so this is the only path that frees it. Shared by both load sources.
+     */
+    private fun onModelLoaded(m: Model) {
+        if (closed) {
+            runCatching { m.close() }
+            return
+        }
+        model = m
+        val rec = buildRecognizer(m) // builds + warms up; null if grammar/recognizer init fails
+        if (closed) { // close() can land while buildRecognizer runs — free what we just built
+            runCatching { rec?.close() }
+            runCatching { m.close() }
+            model = null
+            return
+        }
+        recognizer = rec
+        if (rec != null) onReady() else onUnavailable()
+    }
+
+    /** Bundled-asset source (portal-wake): unpack `assets/[MODEL_ASSET]` into filesDir, then [onModelLoaded]. */
+    private fun unpackFromAssets(context: Context) {
+        org.vosk.android.StorageService.unpack(
+            context,
+            MODEL_ASSET,
+            MODEL_TARGET,
+            { m -> onModelLoaded(m) },
+            { onUnavailable() },
+        )
+    }
+
+    /**
+     * Downloaded-model source (portal-assistant on gen2): the model is already unpacked on disk, so load the
+     * [Model] straight from [dir] on a background thread (the native load is heavy). A missing/partial dir
+     * (no `am/`) is treated as "no model" — [onUnavailable], same as a missing asset.
+     */
+    private fun loadFromDir(dir: File) {
+        // A complete Vosk model has all of [MODEL_DIRS]; a partial dir (e.g. a truncated download) fails fast
+        // here instead of after a slow native Model() load — defense in depth for any caller passing modelDir.
+        if (MODEL_DIRS.any { !File(dir, it).isDirectory }) {
+            onUnavailable()
+            return
+        }
+        Thread {
+            val m = runCatching { Model(dir.absolutePath) }.getOrNull()
+            if (m != null) onModelLoaded(m) else onUnavailable()
+        }.apply {
+            isDaemon = true
+            name = "wake-model-load"
+        }.start()
     }
 
     /**
@@ -156,8 +193,8 @@ class WakeRecognizer(
     /**
      * Swap the grammar to a new wake set **without reloading the model** (the model never changes — only the
      * grammar does). Builds a fresh [Recognizer] from the already-loaded model, then atomically swaps it in
-     * and closes the *old recognizer only*. Cheap (no [org.vosk.android.StorageService.unpack], no ~128 MB
-     * model reload, no leaked unpack executor) — the structural fix for the per-package-update leak.
+     * and closes the *old recognizer only*. Cheap (no [org.vosk.android.StorageService.unpack], no model
+     * reload, no leaked unpack executor) — the structural fix for the per-package-update leak.
      *
      * MUST be called on the capture thread (same thread as [accept]) so we never close a native recognizer
      * while [accept]'s `acceptWaveForm` is in flight on it — the engine enforces this by applying the swap at
@@ -225,6 +262,7 @@ class WakeRecognizer(
     companion object {
         const val MODEL_ASSET = "model-en-us" // assets/model-en-us/
         const val MODEL_TARGET = "vosk-model" // unpacked into filesDir
+        private val MODEL_DIRS = listOf("am", "conf", "graph", "ivector") // every dir a complete Vosk model has
         const val NO_CONF = -1.0 // sentinel: recognizer gave no per-word confidence
         const val WARMUP_SILENCE_FRAMES = 10 // ~1 s of silence to settle the online decoder after a reset
 

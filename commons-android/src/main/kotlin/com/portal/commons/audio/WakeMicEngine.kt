@@ -3,6 +3,7 @@ package com.portal.commons.audio
 import android.content.Context
 import com.portal.commons.DebugLog
 import com.portal.commons.PcmCaptureSession
+import java.io.File
 
 /**
  * Wake **recognition policy** over the shared [PcmCaptureSession]: it owns the [WakeRecognizer], the
@@ -31,6 +32,8 @@ class WakeMicEngine(
     private val onError: (String) -> Unit = {},
     private val onStopped: () -> Unit = {},
     private val beforeStart: () -> Unit = {},
+    // null = bundled asset (portal-wake); a dir = a downloaded, already-unpacked model (portal-assistant gen2).
+    modelDir: File? = null,
 ) {
     @Volatile private var recognizerReady = false // set when the model finishes unpacking (warmed)
     private var wasRecognizerReady = false // capture-thread-only; detects ready transition for buffer flush
@@ -46,6 +49,7 @@ class WakeMicEngine(
             DebugLog.log("wake recognizer ready")
         },
         onUnavailable = onUnavailable,
+        modelDir = modelDir,
     )
 
     private var cooldownUntil = 0L // capture-thread-only; reset on each (re)start
