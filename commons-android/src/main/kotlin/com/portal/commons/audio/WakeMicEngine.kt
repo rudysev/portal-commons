@@ -36,7 +36,7 @@ class WakeMicEngine(
     private var wasRecognizerReady = false // capture-thread-only; detects ready transition for buffer flush
 
     @Volatile private var pendingWakeWords: List<WakeWord>? = null // queued wake-set swap, applied on capture thread
-    private var lastResetAtMs = 0L // capture-thread-only; bounds the Vosk decode lattice (idle reset)
+    private val idleReset = IdleResetPolicy() // capture-thread-only; when to bound the Vosk decode lattice
     private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
     private val recognizer = WakeRecognizer(
         context,
@@ -127,7 +127,7 @@ class WakeMicEngine(
         wasRecognizerReady = false
         cooldownUntil = 0L
         recognizer.reset()
-        lastResetAtMs = System.currentTimeMillis()
+        idleReset.noteFlushed(System.currentTimeMillis())
     }
 
     private fun onFrame(buf: ByteArray, n: Int) {
@@ -153,22 +153,35 @@ class WakeMicEngine(
         pendingWakeWords = null
         DebugLog.log("wake set changed → rebuilding grammar (${words.size} word(s))")
         recognizer.rebuildGrammar(words)
-        lastResetAtMs = System.currentTimeMillis() // fresh recognizer — restart the idle-reset clock
+        idleReset.noteFlushed(System.currentTimeMillis()) // fresh recognizer — restart the idle-reset clock
     }
 
     /**
      * Bound Vosk's native decode lattice. With continuous ambient audio the grammar recognizer can go a long
      * time without endpointing, so its "current utterance" never finalizes and the native lattice grows
      * (~3.8 MB/min observed). Forcing a periodic [WakeRecognizer.reset] (which re-warms) caps that growth.
-     * Skipped during the post-fire cooldown so we never reset mid-handoff.
+     * *When* to reset is [IdleResetPolicy]'s call (see its KDoc): only in decoder silence — a reset landing
+     * mid-utterance discards the in-flight "hey …" and the wake attempt vanishes traceless — with natural
+     * endpoints restarting the clock and a hard backstop for continuous noise. Skipped during the post-fire
+     * cooldown so we never reset mid-handoff.
      */
     private fun maybeIdleReset() {
         val now = System.currentTimeMillis()
         if (now < cooldownUntil) return
-        if (now - lastResetAtMs < IDLE_RESET_MS) return
+        val decision = idleReset.decide(now, recognizer::isMidUtterance)
+        if (decision == IdleResetPolicy.Decision.KEEP) return
         recognizer.reset()
-        lastResetAtMs = now
-        DebugLog.log("idle reset (bounding Vosk lattice)")
+        idleReset.noteFlushed(now)
+        // The forced variant is logged distinctly: it is the one remaining moment a reset can clip speech,
+        // so a vanished wake attempt next to this line in debug.txt is diagnosable.
+        when (decision) {
+            IdleResetPolicy.Decision.RESET -> DebugLog.log("idle reset (bounding Vosk lattice)")
+
+            IdleResetPolicy.Decision.FORCE_RESET ->
+                DebugLog.log("idle reset forced mid-decode (bounding Vosk lattice)")
+
+            IdleResetPolicy.Decision.KEEP -> {}
+        }
     }
 
     /** Feed buffered pre-ready frames to the recognizer once the model becomes ready. */
@@ -184,7 +197,12 @@ class WakeMicEngine(
     /** Run one frame through Vosk; fire [onWake] on a match, log a near-miss (respects post-fire cooldown). */
     private fun tryAcceptFrame(buf: ByteArray, n: Int) {
         if (System.currentTimeMillis() < cooldownUntil) return
-        when (val outcome = recognizer.accept(buf, n)) {
+        val outcome = recognizer.accept(buf, n) ?: return
+        // Any finalized decode means Kaldi flushed the lattice and started a fresh utterance — restart the
+        // idle-reset clock so the manual reset (and its re-warm-up) only runs when the decoder has gone a
+        // long time with no endpoint at all.
+        idleReset.noteFlushed(System.currentTimeMillis())
+        when (outcome) {
             is WakeRecognizer.Outcome.Match -> {
                 // Log the decode (word + conf%) so a false fire shows exactly what Vosk heard, e.g.
                 // `wake detected → jarvis [hey(99) jarvis(62)]`.
@@ -201,7 +219,12 @@ class WakeMicEngine(
                 DebugLog.log("near-miss [${outcome.transcript}] rejected: ${outcome.reason}")
             }
 
-            null -> {}
+            is WakeRecognizer.Outcome.Flushed ->
+                // Keyword-free endpoint — usually just the clock restart above. Non-empty ones are logged
+                // as the dropped-lead diagnostic: if the leading "hey" of a wake is being finalized into
+                // the PREVIOUS utterance, it shows up here (`flushed final [hey(..)]`) immediately before
+                // the bare-keyword `no 'hey'` near-miss. Silence endpoints (empty transcript) stay quiet.
+                if (outcome.transcript.isNotEmpty()) DebugLog.log("flushed final [${outcome.transcript}]")
         }
     }
 
@@ -209,6 +232,5 @@ class WakeMicEngine(
         const val COOLDOWN_MS = 1_500L // ignore further matches briefly after a fire
         const val PRE_READY_MAX_FRAMES = 80 // ~8 s of capture frames — must exceed model warm-up (~6 s)
         const val REBUILD_AFTER_READ_FAILURES = 40 // rebuild the device after a short run of read errors
-        const val IDLE_RESET_MS = 25_000L // cap Vosk's native lattice: force a recognizer reset this often
     }
 }

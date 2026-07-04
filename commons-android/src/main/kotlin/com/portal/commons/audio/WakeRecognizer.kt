@@ -96,11 +96,12 @@ class WakeRecognizer(
 
     /**
      * Feed one frame of 16 kHz mono 16-bit PCM. Returns an [Outcome] when this frame finalizes a decode
-     * that carries a wake keyword — a [Outcome.Match] on a genuine wake, or a [Outcome.NearMiss] when a
-     * keyword decoded but a gate rejected it (so the mic owner can log the near-miss for tuning) — else null
-     * (no finalized decode, or one with no registered keyword). No-op until the model has loaded. The decode
-     * is carried so the mic owner can log *what Vosk heard*, the only way to diagnose a fire or a near-miss
-     * after the fact.
+     * (Vosk endpointed) — a [Outcome.Match] on a genuine wake, a [Outcome.NearMiss] when a keyword decoded
+     * but a gate rejected it (so the mic owner can log the near-miss for tuning), or [Outcome.Flushed] when
+     * the finalized decode carried no registered keyword (silence/ambient — nothing to act on, but the
+     * native lattice was just flushed, which the engine's idle-reset clock wants to know). Null only when
+     * the frame did NOT finalize a decode. No-op until the model has loaded. The decode is carried so the
+     * mic owner can log *what Vosk heard*, the only way to diagnose a fire or a near-miss after the fact.
      */
     fun accept(buf: ByteArray, n: Int): Outcome? {
         val rec = recognizer ?: return null
@@ -109,17 +110,36 @@ class WakeRecognizer(
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
             is WakeMatcher.Outcome.Match -> Outcome.Match(o.id, render(words))
             is WakeMatcher.Outcome.NearMiss -> Outcome.NearMiss(render(words), o.reason)
-            WakeMatcher.Outcome.None -> null
+            WakeMatcher.Outcome.None -> Outcome.Flushed(render(words))
         }
     }
 
-    /** A finalized decode the mic owner should act on or log: a confirmed wake, or a logged near-miss. */
+    /**
+     * Whether the decoder currently holds a non-empty partial hypothesis — i.e., it is mid-way through
+     * decoding sound into words. Used by [WakeMicEngine]'s idle-reset policy to avoid bounding the lattice
+     * (a [reset], which discards that partial) in the middle of a possible wake utterance. False when the
+     * model hasn't loaded or the native call fails — an unreadable partial must not block the memory bound.
+     */
+    fun isMidUtterance(): Boolean {
+        val rec = recognizer ?: return false
+        return runCatching { parsePartialText(rec.partialResult) }.getOrDefault("").isNotEmpty()
+    }
+
+    /** A finalized decode: a confirmed wake, a loggable near-miss, or a keyword-free flush. */
     sealed interface Outcome {
         /** A genuine wake: hand off to [id]. [transcript] is the decode, for the fire log. */
         data class Match(val id: String, val transcript: String) : Outcome
 
         /** A wake keyword decoded but a gate rejected it. [transcript] + [reason] go to the near-miss log. */
         data class NearMiss(val transcript: String, val reason: String) : Outcome
+
+        /**
+         * A finalized decode with no registered keyword: the lattice was flushed; nothing to act on.
+         * [transcript] is empty for a plain silence endpoint; non-empty ones matter diagnostically — a
+         * leading "hey" swallowed into a finalization right before the keyword decodes alone would
+         * surface here (the dropped-lead suspect), where it used to be indistinguishable from silence.
+         */
+        data class Flushed(val transcript: String) : Outcome
     }
 
     /** Render the decode as `word(conf%)` tokens (confidence omitted when the model gave none). */
@@ -225,6 +245,15 @@ class WakeRecognizer(
             val text = obj.optString("text").trim()
             if (text.isEmpty()) return emptyList()
             return text.split(Regex("\\s+")).map { RecWord(it, NO_CONF) }
+        }
+
+        /**
+         * Extract the hypothesis text from a Vosk partial-result JSON (`{"partial" : "hey jar"}`).
+         * Empty when the decoder is quiet or the JSON is malformed. Pure + static, so it is unit-tested.
+         */
+        fun parsePartialText(json: String): String {
+            val obj = runCatching { JSONObject(json) }.getOrNull() ?: return ""
+            return obj.optString("partial").trim()
         }
     }
 }

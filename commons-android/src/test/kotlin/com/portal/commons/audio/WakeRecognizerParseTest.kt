@@ -39,6 +39,24 @@ class WakeRecognizerParseTest {
         assertTrue(WakeRecognizer.parseResult("not json").isEmpty())
     }
 
+    // ---- parsePartialText (feeds WakeRecognizer.isMidUtterance → the idle-reset deferral) ----------
+
+    @Test fun partialTextExtracted() {
+        assertEquals("hey jar", WakeRecognizer.parsePartialText("""{"partial" : "hey jar"}"""))
+        // A bare "[unk]" partial still counts as decoding-in-flight — the text comes back as-is.
+        assertEquals("[unk]", WakeRecognizer.parsePartialText("""{"partial" : "[unk]"}"""))
+    }
+
+    @Test fun quietOrMissingPartialYieldsEmpty() {
+        assertEquals("", WakeRecognizer.parsePartialText("""{"partial" : ""}"""))
+        assertEquals("", WakeRecognizer.parsePartialText("""{"partial" : "   "}"""))
+        assertEquals("", WakeRecognizer.parsePartialText("""{}"""))
+    }
+
+    @Test fun malformedPartialJsonYieldsEmpty() {
+        assertEquals("", WakeRecognizer.parsePartialText("not json"))
+    }
+
     @Test fun endToEnd_parseThenMatch() {
         val jarvis = WakeWord.fromPhrase("hey jarvis", id = "jarvis", minConf = WakeMatcher.BASELINE_CONF)!!
         val json = """{"result":[{"conf":0.9,"word":"hey"},{"conf":0.2,"word":"jarvis"}],"text":"hey jarvis"}"""
