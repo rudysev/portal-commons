@@ -161,12 +161,11 @@ class WakeMicEngine(
     }
 
     /**
-     * Bound Vosk's native decode lattice. With continuous ambient audio the grammar recognizer can go a long
-     * time without endpointing, so its "current utterance" never finalizes and the native lattice grows
-     * (~3.8 MB/min observed). Forcing a periodic [WakeRecognizer.reset] (which re-warms) caps that growth.
-     * *When* to reset is [IdleResetPolicy]'s call (see its KDoc): only in decoder silence — a reset landing
-     * mid-utterance discards the in-flight "hey …" and the wake attempt vanishes traceless — with natural
-     * endpoints restarting the clock and a hard backstop for continuous noise. Skipped during the post-fire
+     * Bound Vosk's native decode lattice. It grows (~3.8 MB/min observed) only while the recognizer isn't
+     * endpointing — with continuous audio the "current utterance" never finalizes. Natural endpoints normally
+     * flush it; this backstop [WakeRecognizer.reset] (which re-warms) covers the case where they stop.
+     * [IdleResetPolicy] owns the timing (see its KDoc): reset only in decoder silence, so it can't bisect an
+     * in-flight "hey …", with a hard cap for pathological continuous noise. Skipped during the post-fire
      * cooldown so we never reset mid-handoff.
      */
     private fun maybeIdleReset() {

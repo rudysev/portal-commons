@@ -1,34 +1,39 @@
 package com.portal.commons.audio
 
 /**
- * Decides **when** [WakeMicEngine] may bound Vosk's native decode lattice with a [WakeRecognizer.reset].
+ * Decides **when** [WakeMicEngine] should bound Vosk's native decode lattice with a [WakeRecognizer.reset].
  *
- * The lattice must be bounded: with continuous ambient audio the grammar recognizer can go a long time
- * without endpointing, and the never-finalized "current utterance" grows ~3.8 MB/min (observed on-device).
- * But a reset discards the decoder's in-flight partial hypothesis, so a timer-only reset that lands mid
- * "hey jarvis" throws away the already-decoded lead — the utterance vanishes without even a near-miss
- * (observed on-device as a wake attempt with no log trace, bracketed by `idle reset` lines).
+ * The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar recognizer can
+ * go a long time without finalizing, and the never-flushed "current utterance" grows ~3.8 MB/min (measured
+ * on-device). A [WakeRecognizer.reset] flushes it — but reset also discards the in-flight partial, so one
+ * that lands mid "hey jarvis" throws away the already-decoded "hey" and the wake vanishes without even a
+ * near-miss. This policy issues that reset as a **backstop**: only when it is both needed and safe.
  *
- * Two rules close that window:
- *  1. **Reset only in decoder silence.** When the idle period elapses, the reset is deferred while the
- *     decoder holds a non-empty partial hypothesis ([WakeRecognizer.isMidUtterance]) and fires at the next
- *     quiet frame — so it can no longer bisect an utterance. A hard backstop ([forceAfterMs]) still forces
- *     the reset under pathological continuous noise (e.g. a TV) that never yields a quiet frame, keeping
- *     the memory bound unconditional: worst case it holds ~[forceAfterMs] of lattice (< 4 MB), not 25 s.
- *  2. **Natural endpoints restart the clock.** Every finalized decode ([noteFlushed]) means Kaldi already
- *     flushed the lattice and started a fresh utterance, so the manual reset is only needed when the
- *     decoder has gone [idleAfterMs] with *no* endpoint at all — in a normal room, where silence endpoints
- *     fire every few seconds, the manual reset (and its re-warm-up) rarely runs.
+ * Two rules:
+ *  1. **Reset only when the decoder is quiet.** Once the lattice has gone [quietResetMs] unflushed, the reset
+ *     waits for a frame with no in-flight partial ([WakeRecognizer.isMidUtterance]) so it can't bisect an
+ *     utterance. [forceResetMs] is the hard cap: past it the reset fires even mid-decode, so pathological
+ *     continuous noise (a TV that never yields a quiet frame) still can't grow the lattice unbounded — worst
+ *     case it holds ~[forceResetMs] of audio (< 4 MB).
+ *  2. **Natural endpoints are the primary bound; this reset is only the fallback.** Every finalized decode
+ *     ([noteFlushed]) means Kaldi already flushed the lattice, which restarts the clock — so the manual reset
+ *     fires only after [quietResetMs] with *no* endpoint at all. In any room with ambient sound Vosk
+ *     endpoints every few seconds, so the clock keeps restarting and this reset may **never** fire. That is
+ *     correct, not a stall: those endpoints are what bound memory. The manual reset earns its keep only in
+ *     the rare continuous-audio case where Vosk stops endpointing entirely.
  *
- * Pure and clock-free (the caller passes `nowMs`), so the deferral rules are unit-tested. Single-threaded
- * by contract: owned and driven by the engine's capture thread only.
+ * Pure and clock-free (the caller passes `nowMs`), so the rules are unit-tested. Single-threaded by
+ * contract: owned and driven by the engine's capture thread only.
  */
 class IdleResetPolicy(
-    private val idleAfterMs: Long = DEFAULT_IDLE_AFTER_MS,
-    private val forceAfterMs: Long = DEFAULT_FORCE_AFTER_MS,
+    // Unflushed this long → reset at the next quiet frame (rule 1). A backstop, not a fixed cadence: rule 2
+    // keeps restarting the clock on natural endpoints, so in most rooms this never trips.
+    private val quietResetMs: Long = DEFAULT_QUIET_RESET_MS,
+    // Hard cap: reset once unflushed this long even mid-decode, so memory stays bounded under continuous noise.
+    private val forceResetMs: Long = DEFAULT_FORCE_RESET_MS,
 ) {
     init {
-        require(idleAfterMs in 1..forceAfterMs) { "need 0 < idleAfterMs <= forceAfterMs" }
+        require(quietResetMs in 1..forceResetMs) { "need quietResetMs >= 1 and quietResetMs <= forceResetMs" }
     }
 
     private var flushedAtMs = 0L // last instant the lattice was known bounded (reset, rebuild, or endpoint)
@@ -38,16 +43,16 @@ class IdleResetPolicy(
         /** Lattice still bounded recently enough, or an utterance is in flight — don't reset. */
         KEEP,
 
-        /** Idle period elapsed and the decoder is quiet — reset now; nothing in flight to lose. */
+        /** Unflushed past [quietResetMs] and the decoder is quiet — reset now; nothing in flight to lose. */
         RESET,
 
-        /** Backstop: the decoder has been mid-decode past [forceAfterMs] — reset anyway to bound memory. */
+        /** Backstop: unflushed past [forceResetMs] while still mid-decode — reset anyway to bound memory. */
         FORCE_RESET,
     }
 
     /**
      * The lattice was just bounded — by a manual reset, a grammar rebuild (fresh recognizer), or a natural
-     * Vosk endpoint (any finalized decode flushes it). Restarts the idle clock.
+     * Vosk endpoint (any finalized decode flushes it). Restarts the unflushed clock.
      */
     fun noteFlushed(nowMs: Long) {
         flushedAtMs = nowMs
@@ -55,22 +60,23 @@ class IdleResetPolicy(
 
     /**
      * Should the engine reset now? [isMidUtterance] is a lambda (not a value) so the decoder's partial
-     * result — a native call — is queried only once the idle period has actually elapsed, not per frame.
+     * result — a native call — is queried only once [quietResetMs] has actually elapsed, not per frame.
      */
     fun decide(nowMs: Long, isMidUtterance: () -> Boolean): Decision {
         val unflushedMs = nowMs - flushedAtMs
-        if (unflushedMs < idleAfterMs) return Decision.KEEP
-        // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a
-        // real "hey" is still settling, and the backstop caps how long noise can hold the reset off.
+        if (unflushedMs < quietResetMs) return Decision.KEEP
+        // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a real
+        // "hey" is still settling. forceResetMs caps how long that deferral can hold the reset off.
         if (!isMidUtterance()) return Decision.RESET
-        return if (unflushedMs >= forceAfterMs) Decision.FORCE_RESET else Decision.KEEP
+        return if (unflushedMs >= forceResetMs) Decision.FORCE_RESET else Decision.KEEP
     }
 
     companion object {
-        /** Reset this long after the last known flush (natural endpoints keep pushing it back). */
-        const val DEFAULT_IDLE_AFTER_MS = 25_000L
+        /** Unflushed this long with no natural endpoint → reset at the next quiet frame (see rule 2: a
+         *  backstop for the continuous-audio case, not a guaranteed cadence). */
+        const val DEFAULT_QUIET_RESET_MS = 25_000L
 
-        /** Backstop: never let the lattice grow past this, even mid-decode (~3.8 MB/min → < 4 MB held). */
-        const val DEFAULT_FORCE_AFTER_MS = 60_000L
+        /** Hard cap on unflushed time — reset even mid-decode past here (~3.8 MB/min → < 4 MB held). */
+        const val DEFAULT_FORCE_RESET_MS = 60_000L
     }
 }

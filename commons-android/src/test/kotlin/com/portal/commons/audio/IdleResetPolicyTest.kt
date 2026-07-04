@@ -14,7 +14,7 @@ class IdleResetPolicyTest {
     private val quiet = { false }
     private val midUtterance = { true }
 
-    private fun policy() = IdleResetPolicy(idleAfterMs = IDLE, forceAfterMs = FORCE)
+    private fun policy() = IdleResetPolicy(quietResetMs = IDLE, forceResetMs = FORCE)
 
     // ---- the idle timer ----------------------------------------------------------------------------
 
