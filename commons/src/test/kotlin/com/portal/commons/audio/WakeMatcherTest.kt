@@ -237,4 +237,52 @@ class WakeMatcherTest {
         val out = WakeMatcher.evaluate(rec("[unk]" to 0.51, "hey" to 0.99, "jarvis" to 0.99), words)
         assertTrue(out is WakeMatcher.Outcome.NearMiss && "contaminated" in out.reason)
     }
+
+    // ---- doubled-lead recall: Vosk splits one spoken "hey" into repeats (collapseRepeats) -------------
+
+    @Test fun collapseRepeats_foldsConsecutiveDuplicates_keepingMaxConf() {
+        val out = WakeMatcher.collapseRepeats(rec("hey" to 0.72, "hey" to 0.98, "hey" to 1.0, "jarvis" to 1.0))
+        assertEquals(listOf(RecWord("hey", 1.0), RecWord("jarvis", 1.0)), out)
+    }
+
+    @Test fun collapseRepeats_keepsDistinctAndNonAdjacent() {
+        // distinct words untouched; non-adjacent repeats are NOT merged (conservative).
+        val out = WakeMatcher.collapseRepeats(rec("hey" to 0.9, "jarvis" to 0.9, "hey" to 0.8, "jarvis" to 0.8))
+        assertEquals(4, out.size)
+    }
+
+    @Test fun doubledHey_matches() {
+        // `[hey hey hey jarvis]` for one spoken "hey jarvis" (Vosk split the lead) → folds to a clean
+        // 2-word phrase → fires. Without the fix this was rejected as "phrase too long" (missed on-device).
+        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.72, "hey" to 0.98, "hey" to 1.0, "jarvis" to 1.0), words))
+    }
+
+    @Test fun doubledKeyword_matches() {
+        // `[hey jarvis jarvis jarvis]` folds the repeated keyword → clean phrase → fires.
+        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.99, "jarvis" to 0.9, "jarvis" to 1.0, "jarvis" to 0.95), words))
+    }
+
+    @Test fun repeatedLead_doesNotDefeatContaminationGate() {
+        // Folding repeats must NOT fold "[unk]" away — a contaminated decode with a doubled hey is still rejected.
+        val out = WakeMatcher.evaluate(rec("[unk]" to 0.5, "hey" to 0.99, "hey" to 1.0, "jarvis" to 0.99), words)
+        assertTrue(out is WakeMatcher.Outcome.NearMiss && "contaminated" in out.reason)
+    }
+
+    @Test fun distinctFillerWords_stillTooLong_afterCollapse() {
+        // Only *adjacent duplicates* fold; genuine multi-word fillers still exceed the clean-phrase limit.
+        val out = WakeMatcher.evaluate(rec("hey" to 0.96, "could" to 0.8, "you" to 0.8, "jarvis" to 0.95), words)
+        assertTrue(out is WakeMatcher.Outcome.NearMiss && "phrase too long" in out.reason)
+    }
+
+    @Test fun doubledUnk_foldsToOne_contaminationStillFires() {
+        // Folding a repeated "[unk]" must keep one "[unk]" — it must never launder contamination away.
+        val out = WakeMatcher.evaluate(rec("[unk]" to 0.9, "[unk]" to 0.5, "hey" to 0.99, "jarvis" to 0.99), words)
+        assertTrue(out is WakeMatcher.Outcome.NearMiss && "contaminated" in out.reason)
+    }
+
+    @Test fun doubledHey_matches_lenientRoute() {
+        // Lenient routes benefit too: a low-confidence vega that fails the 4-word embedded path fires once
+        // the doubled lead folds to a clean 2-word phrase (the lenient clean-phrase bypass then applies).
+        assertEquals("vega", WakeMatcher.match(rec("hey" to 0.9, "hey" to 0.95, "hey" to 0.9, "vega" to 0.1), words))
+    }
 }

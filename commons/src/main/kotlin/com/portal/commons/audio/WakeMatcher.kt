@@ -91,6 +91,46 @@ object WakeMatcher {
     }
 
     /**
+     * Collapse runs of the same consecutive word into a single token (keeping the run's highest
+     * confidence), so a repeated **lead or keyword** counts once against the clean-phrase length gate.
+     *
+     * Vosk sometimes emits one spoken word as several identical tokens — observed on human speech as
+     * `[hey hey jarvis]` (and `[hey hey hey jarvis]`) for a single "hey jarvis", where the extra "hey"s are
+     * the same sound segmented across a tight (< ~250 ms) intra-utterance boundary, not a second word.
+     * Left as-is they push a genuine wake over [CLEAN_PHRASE_MAX_WORDS] and it is rejected as "phrase too
+     * long" (a missed wake, confirmed on-device). Collapsing is mechanism-agnostic: a stutter, an acoustic
+     * segmentation, or a quick repeat all fold to one.
+     *
+     * Only **adjacent identical** words merge, so nothing a gate relies on is lost: distinct words still
+     * count in full (an embedded "hey could you ask jarvis" stays long → still rejected), and "[unk]" — the
+     * contamination marker — is a distinct word that never folds into a keyword/lead (a doubled "[unk]"
+     * folds to *one* "[unk]", so contamination still fires), so the strict [UNK_TOKEN] gate is untouched.
+     * Non-adjacent repeats ("hey jarvis hey jarvis") are left as-is.
+     *
+     * The fold is **word-agnostic** (any adjacent duplicate, not only a lead/keyword): a doubled *filler*
+     * like "um um hey jarvis" also collapses, which can shorten a borderline phrase. Accepted trade-off —
+     * Vosk duplicates the lead far more than fillers, and a match still requires the lead + keyword within
+     * [CLEAN_PHRASE_MAX_WORDS] and no [UNK_TOKEN]. Narrow to lead/keyword tokens only if filler-doubling
+     * ever surfaces in the near-miss logs.
+     *
+     * Expects already-lowercased input (as [evaluate] passes). Pure + static, so it is unit-tested.
+     */
+    fun collapseRepeats(words: List<RecWord>): List<RecWord> {
+        if (words.size < 2) return words
+        val out = ArrayList<RecWord>(words.size)
+        for (rw in words) {
+            val last = out.lastOrNull()
+            if (last != null && last.word == rw.word) {
+                // Same sound decoded twice in a row — keep the higher-confidence instance, drop the duplicate.
+                if (rw.conf > last.conf) out[out.size - 1] = rw
+            } else {
+                out.add(rw)
+            }
+        }
+        return out
+    }
+
+    /**
      * Returns the id of the first [wakeWords] entry genuinely spoken in [words], or null. Deterministic
      * and side-effect-free. Thin wrapper over [evaluate] — kept as the load-bearing accuracy entry point.
      */
@@ -104,7 +144,9 @@ object WakeMatcher {
      */
     fun evaluate(words: List<RecWord>, wakeWords: List<WakeWord>): Outcome {
         if (words.isEmpty()) return Outcome.None
-        val lower = words.map { RecWord(it.word.lowercase(), it.conf) }
+        // Fold consecutive duplicate tokens (Vosk can split one spoken "hey" into several) BEFORE the gates,
+        // so a repeated lead doesn't trip the clean-phrase length limit — see [collapseRepeats].
+        val lower = collapseRepeats(words.map { RecWord(it.word.lowercase(), it.conf) })
         var nearMiss: Outcome.NearMiss? = null // first keyword-present rejection, if no word matches
         for (w in wakeWords) {
             val keyword = w.keyword.lowercase()
