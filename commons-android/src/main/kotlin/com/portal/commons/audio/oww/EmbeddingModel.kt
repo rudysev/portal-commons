@@ -15,7 +15,7 @@ import android.content.res.AssetManager
 internal class EmbeddingModel(
     assetManager: AssetManager,
     modelPath: String,
-) : AutoCloseable {
+) : Embedder, AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession = assetManager.open(modelPath).use { input ->
@@ -24,7 +24,7 @@ internal class EmbeddingModel(
     private val inputName: String = session.inputNames.first()
 
     /** @param input [batch][76][32][1] → @return [batch][96] */
-    fun generate(input: Array<Array<Array<FloatArray>>>): Array<FloatArray> {
+    override fun generate(input: Array<Array<Array<FloatArray>>>): Array<FloatArray> {
         var inputTensor: OnnxTensor? = null
         return try {
             inputTensor = OnnxTensor.createTensor(env, input)

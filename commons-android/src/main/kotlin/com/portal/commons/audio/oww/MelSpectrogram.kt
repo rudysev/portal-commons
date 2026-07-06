@@ -20,7 +20,7 @@ import java.nio.FloatBuffer
 internal class MelSpectrogram(
     assetManager: AssetManager,
     modelPath: String,
-) : AutoCloseable {
+) : MelExtractor, AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession = assetManager.open(modelPath).use { input ->
@@ -29,7 +29,7 @@ internal class MelSpectrogram(
     private val inputName: String = session.inputNames.first()
 
     /** Compute mel frames for [audioSamples]; returns [frames][32]. */
-    fun compute(audioSamples: FloatArray): Array<FloatArray> {
+    override fun compute(audioSamples: FloatArray): Array<FloatArray> {
         var inputTensor: OnnxTensor? = null
         return try {
             inputTensor = OnnxTensor.createTensor(

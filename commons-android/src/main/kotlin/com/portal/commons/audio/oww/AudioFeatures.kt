@@ -1,6 +1,5 @@
 package com.portal.commons.audio.oww
 
-import android.content.res.AssetManager
 import java.util.ArrayDeque
 import kotlin.random.Random
 
@@ -14,12 +13,14 @@ import kotlin.random.Random
  * cached (see the ml/ classes); (2) `predictWakeWord` is split out — this class only produces
  * features, so [OwwRecognizer] can run multiple wake models over one feature computation.
  *
+ * The [MelExtractor]/[Embedder] stages are injected (production: [MelSpectrogram]/[EmbeddingModel]) so the
+ * buffering can be exercised by deterministic fakes in a pure-JVM test.
+ *
  * NOT thread-safe: drive it from a single capture thread (as [OwwRecognizer] does).
  */
 internal class AudioFeatures(
-    assetManager: AssetManager,
-    melModelPath: String,
-    embeddingModelPath: String,
+    private val mel: MelExtractor,
+    private val embedding: Embedder,
 ) : AutoCloseable {
 
     private companion object {
@@ -33,9 +34,6 @@ internal class AudioFeatures(
         const val SCORE_WINDOW = 16            // embedding frames the wake model scores: [1,16,96]
         const val EMBED_DIM = 96               // embedding vector length
     }
-
-    private val mel = MelSpectrogram(assetManager, melModelPath)
-    private val embedding = EmbeddingModel(assetManager, embeddingModelPath)
 
     private var featureBuffer: Array<FloatArray>
     private val rawDataBuffer = ArrayDeque<Float>(SAMPLE_RATE * 10)
@@ -157,7 +155,7 @@ internal class AudioFeatures(
     }
 
     override fun close() {
-        mel.close()
-        embedding.close()
+        (mel as? AutoCloseable)?.close()
+        (embedding as? AutoCloseable)?.close()
     }
 }

@@ -3,6 +3,8 @@ package com.portal.commons.audio
 import android.content.Context
 import com.portal.commons.DebugLog
 import com.portal.commons.audio.oww.AudioFeatures
+import com.portal.commons.audio.oww.EmbeddingModel
+import com.portal.commons.audio.oww.MelSpectrogram
 import com.portal.commons.audio.oww.WakeWordModelRunner
 
 /**
@@ -33,7 +35,7 @@ class OwwRecognizer(
     @Volatile private var features: AudioFeatures? = null
     @Volatile private var runners: List<Pair<OwwWakeWord, WakeWordModelRunner>> = emptyList()
     @Volatile private var closed = false
-    private val consecutive = HashMap<String, Int>() // capture-thread-only
+    private val debounce = WakeDebounce()             // capture-thread-only; per-wake consecutive-frame gate
     private var loggedInferenceError = false          // capture-thread-only; log a scoring failure once
 
     /**
@@ -55,7 +57,7 @@ class OwwRecognizer(
     init {
         Thread {
             try {
-                val feats = AudioFeatures(assets, MEL_MODEL, EMBEDDING_MODEL)
+                val feats = AudioFeatures(MelSpectrogram(assets, MEL_MODEL), EmbeddingModel(assets, EMBEDDING_MODEL))
                 val built = initialWakeWords.map { it to WakeWordModelRunner(assets, it.modelAsset) }
                 if (closed) {
                     feats.close(); built.forEach { it.second.close() }
@@ -84,14 +86,9 @@ class OwwRecognizer(
                 val score = runner.score(window)
                 log?.invoke(wake.id, score)
                 if (score >= wake.threshold) {
-                    val c = (consecutive[wake.id] ?: 0) + 1
-                    if (c >= OwwTuning.DEBOUNCE_FRAMES) {
-                        consecutive[wake.id] = 0
-                        return Match(wake.id, score)
-                    }
-                    consecutive[wake.id] = c
+                    if (debounce.onAboveThreshold(wake.id)) return Match(wake.id, score)
                 } else {
-                    consecutive[wake.id] = 0
+                    debounce.onBelowThreshold(wake.id)
                 }
             }
             null
@@ -107,7 +104,7 @@ class OwwRecognizer(
     /** Drop buffered audio + debounce state on each (re)start so pre-pause audio can't linger. */
     fun reset() {
         features?.reset()
-        consecutive.clear()
+        debounce.reset()
     }
 
     fun close() {
