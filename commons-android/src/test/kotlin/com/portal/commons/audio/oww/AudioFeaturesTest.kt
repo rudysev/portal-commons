@@ -12,11 +12,15 @@ import org.junit.Test
  */
 class AudioFeaturesTest {
 
-    /** Emits `input.size / 160` mel frames (hop 160), each a distinct increasing id — traces which samples land where. */
+    /**
+     * Emits `input.size / 160` mel frames (hop 160). Each frame's value is the first raw sample of that hop —
+     * **content-sensitive**, so the golden also pins the exact raw samples (and their order) that the raw ring
+     * hands to the mel stage, not just the frame counts. With a distinct-per-sample ramp fed in, any ring
+     * mis-ordering shows up in the checksum.
+     */
     private class FakeMel : MelExtractor {
-        var nextId = 0f
         override fun compute(audioSamples: FloatArray): Array<FloatArray> =
-            Array(audioSamples.size / 160) { val id = nextId++; FloatArray(32) { id } }
+            Array(audioSamples.size / 160) { fi -> FloatArray(32) { audioSamples[fi * 160] } }
     }
 
     /** Records each embedding window's (firstFrameId, lastFrameId); returns a 96-vec carrying that span. */
@@ -46,11 +50,11 @@ class AudioFeaturesTest {
         val emb = FakeEmbedder()
         val af = AudioFeatures(mel, emb)
         af.reset()                       // mirror a production re-arm; also isolates from the init warm-up
-        mel.nextId = 0f
         emb.spans.clear()
-        // 150 × 100 ms production frames (1600 samples): enough to fill the 16-window score buffer and cross
-        // both the feature-buffer (120) and mel-buffer (970) trim caps.
-        repeat(150) { af.accept(FloatArray(1600)) }
+        // 150 × 100 ms production frames (1600 samples) of a distinct-per-sample ramp: enough to fill the
+        // 16-window score buffer and cross both the feature-buffer (120) and mel-buffer (970) trim caps.
+        var sample = 0f
+        repeat(150) { af.accept(FloatArray(1600) { sample++ }) }
         assertEquals(GOLDEN, signature(emb.spans))
     }
 
@@ -75,7 +79,9 @@ class AudioFeaturesTest {
     }
 
     private companion object {
-        // Captured from the known-good buffering. Regenerate deliberately only if the algorithm is meant to change.
-        private const val GOLDEN = "count=187 checksum=-677914761722745295 tail=[1711-1786;1722-1797;1733-1808;1741-1816;1752-1827;1763-1838;1774-1849;1785-1860;1793-1868;1804-1879;1815-1890;1826-1901;1837-1912;1845-1920;1856-1931;1867-1942]"
+        // Captured from the known-good buffering (verified byte-identical between the ArrayDeque original and
+        // the primitive-ring rewrite via a stash/pop cross-check). Regenerate only if the algorithm is meant
+        // to change. The span values are raw-sample indices (content-sensitive), so this also pins ring ordering.
+        private const val GOLDEN = "count=187 checksum=-684796710055088591 tail=[210880-220000;212160-221280;213440-222560;214240-223840;215520-225120;217280-226400;218560-227680;219840-228960;220640-230240;221920-231520;223680-232800;224960-234080;226240-235360;227040-236640;228320-237920;230080-239200]"
     }
 }

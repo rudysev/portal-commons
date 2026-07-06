@@ -1,6 +1,5 @@
 package com.portal.commons.audio.oww
 
-import java.util.ArrayDeque
 import kotlin.random.Random
 
 /**
@@ -35,17 +34,26 @@ internal class AudioFeatures(
         const val EMBED_DIM = 96               // embedding vector length
     }
 
-    private var featureBuffer: Array<FloatArray>
-    private val rawDataBuffer = ArrayDeque<Float>(SAMPLE_RATE * 10)
+    // Primitive fixed-capacity ring buffers (no per-step boxing/reallocation): raw samples for the mel
+    // context, mel frames for the embedding windows, embedding frames for the score window. Capacities are
+    // the old `takeLast` caps, so logical indexing (0 = oldest retained) is identical.
+    private val rawRing = SampleRing(SAMPLE_RATE * 10)
     private var rawDataRemainder = FloatArray(0)
-    private var melBuffer: Array<FloatArray> = Array(WINDOW_SIZE) { FloatArray(MEL_BINS) { 1.0f } }
+    private val melRing = RowRing(MEL_SPECTROGRAM_MAX_LEN)
+    private val featureRing = RowRing(FEATURE_BUFFER_MAX_LEN)
     private var accumulatedSamples = 0
 
     init {
+        seedMel()
         // Warm the feature buffer with embeddings of random audio (matches openWakeWord's init), so
         // getFeatures(16) always has 16 frames from the first real chunk.
         val random = FloatArray(SAMPLE_RATE * 4) { Random.nextFloat() * 2000f - 1000f }
-        featureBuffer = embeddingsFor(random)
+        featureRing.addAll(embeddingsFor(random))
+    }
+
+    /** Seed the mel ring with [WINDOW_SIZE] frames so the first embedding window is full (openWakeWord's init state). */
+    private fun seedMel() {
+        repeat(WINDOW_SIZE) { melRing.add(FloatArray(MEL_BINS) { 1.0f }) }
     }
 
     /** Push one buffer of int16-magnitude float samples; returns the current [1,16,96] feature window. */
@@ -64,11 +72,13 @@ internal class AudioFeatures(
      * so the priming content never matters — only its shape does.
      */
     fun reset() {
-        rawDataBuffer.clear()
+        rawRing.clear()
         rawDataRemainder = FloatArray(0)
-        melBuffer = Array(WINDOW_SIZE) { FloatArray(MEL_BINS) { 1.0f } }
+        melRing.clear()
+        seedMel()
         accumulatedSamples = 0
-        featureBuffer = Array(SCORE_WINDOW) { FloatArray(EMBED_DIM) }
+        featureRing.clear()
+        repeat(SCORE_WINDOW) { featureRing.add(FloatArray(EMBED_DIM)) }
     }
 
     private fun streamingFeatures(audioBuffer: FloatArray) {
@@ -82,55 +92,42 @@ internal class AudioFeatures(
         if (accumulatedSamples + buffer.size >= N_PREPARED_SAMPLES) {
             val remainder = (accumulatedSamples + buffer.size) % N_PREPARED_SAMPLES
             if (remainder != 0) {
-                val evenChunks = buffer.copyOfRange(0, buffer.size - remainder)
-                bufferRawData(evenChunks)
-                accumulatedSamples += evenChunks.size
+                rawRing.add(buffer, 0, buffer.size - remainder)
+                accumulatedSamples += buffer.size - remainder
                 rawDataRemainder = buffer.copyOfRange(buffer.size - remainder, buffer.size)
             } else {
-                bufferRawData(buffer)
+                rawRing.add(buffer, 0, buffer.size)
                 accumulatedSamples += buffer.size
             }
         } else {
             accumulatedSamples += buffer.size
-            bufferRawData(buffer)
+            rawRing.add(buffer, 0, buffer.size)
         }
 
         if (accumulatedSamples >= N_PREPARED_SAMPLES && accumulatedSamples % N_PREPARED_SAMPLES == 0) {
             streamingMelSpectrogram(accumulatedSamples)
             for (i in (accumulatedSamples / N_PREPARED_SAMPLES) - 1 downTo 0) {
-                val ndx = if (i == 0) melBuffer.size else melBuffer.size - STEP_SIZE * i
+                val ndx = if (i == 0) melRing.size else melRing.size - STEP_SIZE * i
                 val start = maxOf(0, ndx - WINDOW_SIZE)
                 val window = Array(WINDOW_SIZE) { k ->
                     Array(MEL_BINS) { w ->
                         val src = start + k
-                        FloatArray(1) { if (src < ndx && src < melBuffer.size) melBuffer[src][w] else 0f }
+                        FloatArray(1) { if (src < ndx && src < melRing.size) melRing.get(src)[w] else 0f }
                     }
                 }
                 val newFeatures = embedding.generate(arrayOf(window))
-                featureBuffer += newFeatures
+                featureRing.addAll(newFeatures) // ring auto-caps at FEATURE_BUFFER_MAX_LEN
             }
             accumulatedSamples = 0
         }
-
-        if (featureBuffer.size > FEATURE_BUFFER_MAX_LEN) {
-            featureBuffer = featureBuffer.takeLast(FEATURE_BUFFER_MAX_LEN).toTypedArray()
-        }
-    }
-
-    private fun bufferRawData(data: FloatArray) {
-        while (rawDataBuffer.size + data.size > SAMPLE_RATE * 10) rawDataBuffer.poll()
-        for (v in data) rawDataBuffer.offer(v)
     }
 
     private fun streamingMelSpectrogram(nSamples: Int) {
-        require(rawDataBuffer.size >= 400) { "need >=400 samples (25 ms) for melspectrogram" }
-        val list = rawDataBuffer.toArray()
-        val take = minOf(list.size, nSamples + 480) // +480 (160*3) samples of context, like openWakeWord
-        val temp = FloatArray(take) { list[list.size - take + it] as Float }
-        melBuffer += mel.compute(temp)
-        if (melBuffer.size > MEL_SPECTROGRAM_MAX_LEN) {
-            melBuffer = melBuffer.takeLast(MEL_SPECTROGRAM_MAX_LEN).toTypedArray()
-        }
+        require(rawRing.size >= 400) { "need >=400 samples (25 ms) for melspectrogram" }
+        val take = minOf(rawRing.size, nSamples + 480) // +480 (160*3) samples of context, like openWakeWord
+        val temp = FloatArray(take)
+        rawRing.copyLast(take, temp)
+        melRing.addAll(mel.compute(temp)) // ring auto-caps at MEL_SPECTROGRAM_MAX_LEN
     }
 
     /** Embeddings for a whole clip (init warm-up only). */
@@ -149,13 +146,75 @@ internal class AudioFeatures(
     }
 
     /** The last [n] embeddings as a [1][n][96] tensor. */
-    private fun lastFeatures(n: Int): Array<Array<FloatArray>> {
-        val start = maxOf(0, featureBuffer.size - n)
-        return arrayOf(featureBuffer.copyOfRange(start, featureBuffer.size))
-    }
+    private fun lastFeatures(n: Int): Array<Array<FloatArray>> = arrayOf(featureRing.copyLast(n))
 
     override fun close() {
         (mel as? AutoCloseable)?.close()
         (embedding as? AutoCloseable)?.close()
+    }
+
+    /**
+     * Fixed-capacity primitive FIFO of raw samples — one backing [FloatArray], O(1) append, O(n) tail read.
+     * Replaces an `ArrayDeque<Float>` (boxed) whose only read was the last (nSamples+480) samples.
+     */
+    private class SampleRing(private val capacity: Int) {
+        private val buf = FloatArray(capacity)
+        private var head = 0 // next write position
+        var size = 0; private set
+
+        fun clear() { head = 0; size = 0 }
+
+        fun add(data: FloatArray, from: Int, len: Int) {
+            var s = from
+            repeat(len) {
+                buf[head] = data[s++]
+                if (++head == capacity) head = 0
+                if (size < capacity) size++
+            }
+        }
+
+        /** Copy the most recent [n] samples (n ≤ size) into [out], oldest-of-those first. */
+        fun copyLast(n: Int, out: FloatArray) {
+            var idx = head - n
+            if (idx < 0) idx += capacity
+            for (i in 0 until n) {
+                out[i] = buf[idx]
+                if (++idx == capacity) idx = 0
+            }
+        }
+    }
+
+    /**
+     * Fixed-capacity ring of frame rows ([FloatArray]) — O(1) append with automatic oldest-eviction, and
+     * O(1) indexed read by logical position (0 = oldest retained). Replaces `Array += row` + `takeLast(cap)`,
+     * whose grow-then-trim copied the whole row array every step.
+     */
+    private class RowRing(private val capacity: Int) {
+        private val rows = arrayOfNulls<FloatArray>(capacity)
+        private var head = 0
+        var size = 0; private set
+
+        fun clear() { head = 0; size = 0 }
+
+        fun add(row: FloatArray) {
+            rows[head] = row
+            if (++head == capacity) head = 0
+            if (size < capacity) size++
+        }
+
+        fun addAll(newRows: Array<FloatArray>) { for (r in newRows) add(r) }
+
+        /** Row at logical index [i] in [0, size): 0 = oldest retained. */
+        fun get(i: Int): FloatArray {
+            var idx = (head - size + i) % capacity
+            if (idx < 0) idx += capacity
+            return rows[idx]!!
+        }
+
+        /** The most recent min(n, size) rows, oldest-first. */
+        fun copyLast(n: Int): Array<FloatArray> {
+            val m = if (n < size) n else size
+            return Array(m) { get(size - m + it) }
+        }
     }
 }
