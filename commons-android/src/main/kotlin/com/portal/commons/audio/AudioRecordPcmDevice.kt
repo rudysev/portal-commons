@@ -8,15 +8,21 @@ import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.PcmDevice
 
 /**
- * The shared Android microphone behind the [PcmDevice] seam: one `AudioRecord` (VOICE_RECOGNITION,
- * 16 kHz mono 16-bit, **no audio effects** — AGC/NoiseSuppressor deliberately off, the proven Portal
- * config). Recreated on each [open] so [com.portal.commons.PcmCaptureSession] can rebuild it after a run of
- * read errors; [read] is **non-blocking** (`AudioRecord.READ_NON_BLOCKING`). Used by consuming apps'
- * capture sessions.
+ * The shared Android microphone behind the [PcmDevice] seam: one `AudioRecord`, 16 kHz mono 16-bit, **no
+ * audio effects attached**. Recreated on each [open] so [com.portal.commons.PcmCaptureSession] can rebuild
+ * it after a run of read errors; [read] is **non-blocking** (`AudioRecord.READ_NON_BLOCKING`). Used by
+ * consuming apps' capture sessions.
+ *
+ * The [source] defaults to `VOICE_RECOGNITION` (AGC + noise suppression off — the long-proven Portal
+ * config). It is a constructor param so the wake path can A/B-test other sources (`MIC`, `UNPROCESSED`) for
+ * openWakeWord recall — see the wake-capture tuning in portal-assistant. The conversation capture keeps the
+ * default.
  *
  * Caller must hold RECORD_AUDIO.
  */
-class AudioRecordPcmDevice : PcmDevice {
+class AudioRecordPcmDevice(
+    private val source: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+) : PcmDevice {
     @Volatile private var record: AudioRecord? = null
 
     @SuppressLint("MissingPermission")
@@ -25,7 +31,7 @@ class AudioRecordPcmDevice : PcmDevice {
         if (minBuf <= 0) return false // ERROR / ERROR_BAD_VALUE: this rate/channel/encoding isn't supported
         val r = runCatching {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                source,
                 PcmCaptureFormat.SAMPLE_RATE,
                 CHANNEL,
                 ENCODING,

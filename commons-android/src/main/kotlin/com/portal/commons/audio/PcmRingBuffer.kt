@@ -1,7 +1,7 @@
 package com.portal.commons.audio
 
 /**
- * Fixed-capacity FIFO of recent PCM frames. Used to retain speech spoken while the Vosk model is still
+ * Fixed-capacity FIFO of recent PCM frames. Used to retain speech spoken while the wake models are still
  * loading so it can be fed to the recognizer once ready (instead of being discarded).
  */
 internal class PcmRingBuffer(private val maxFrames: Int) {
@@ -24,6 +24,10 @@ internal class PcmRingBuffer(private val maxFrames: Int) {
         frames.clear()
         return copy
     }
+
+    /** Discard all buffered frames without returning them (e.g. on (re)start, so pre-pause audio can't linger). */
+    @Synchronized
+    fun clear() = frames.clear()
 
     @Synchronized
     fun isEmpty(): Boolean = frames.isEmpty()
