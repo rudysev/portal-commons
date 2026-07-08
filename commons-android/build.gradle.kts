@@ -40,6 +40,9 @@ dependencies {
     implementation(project(":commons")) // PcmDevice seam + PcmCaptureFormat
     // On-device wake-word recognition (WakeRecognizer/WakeMicEngine) — free, keyless, offline, no GMS.
     implementation("com.alphacephei:vosk-android:0.3.75")
+    // openWakeWord: ONNX Runtime for Android (self-contained native lib, no GMS) for the shared neural KWS.
+    // Both apps get it transitively — it is the routing wake detector on gen1 (portal-wake) and gen2 (assistant).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303") // real org.json for the WakeRecognizer.parseResult test
 }

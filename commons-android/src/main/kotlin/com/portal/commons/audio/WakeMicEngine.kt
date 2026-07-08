@@ -180,5 +180,31 @@ class WakeMicEngine(
             onStopped = onStopped,
             beforeStart = beforeStart,
         )
+
+        /**
+         * openWakeWord-only engine — the neural KWS reading bundled ONNX assets (`assets/oww/…`, shipped via
+         * `commons-android`), no runtime model download. A single-detector drop-in mirroring [vosk].
+         *
+         * [onUnavailable] fires only if the oww assets are missing (they are bundled, so it shouldn't in
+         * practice). [onWake] delivers the wake id (the fixed "jarvis" for this model).
+         */
+        fun oww(
+            context: Context,
+            wakeWords: List<WakeWord>,
+            onUnavailable: () -> Unit = {},
+            onWake: (String) -> Unit = {},
+            onError: (String) -> Unit = {},
+            onStopped: () -> Unit = {},
+            beforeStart: () -> Unit = {},
+        ): WakeMicEngine = WakeMicEngine(
+            context = context,
+            wakeWords = wakeWords,
+            detectorFactories = listOf(OpenWakeWordDetector.factory()),
+            onWake = { _, id, _ -> onWake(id) },
+            onUnavailable = { onUnavailable() },
+            onError = onError,
+            onStopped = onStopped,
+            beforeStart = beforeStart,
+        )
     }
 }
