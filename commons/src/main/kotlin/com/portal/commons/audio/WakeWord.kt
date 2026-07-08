@@ -16,12 +16,9 @@ package com.portal.commons.audio
  * @param id      stable key reported back on a match (e.g. "jarvis", "alexa").
  * @param keyword the salient word the matcher spots (e.g. "jarvis").
  * @param lead    the word that must precede [keyword] (e.g. "hey", "hi"), or null when none is required.
- *   Precision comes from this declared lead, not a hardcoded "hey" — see [WakeMatcher].
- * @param minConf keyword-confidence floor to accept this wake word. At or below
- *   [WakeMatcher.BASELINE_CONF] the lenient clean-phrase bypass applies (a clean short "<lead> <keyword>"
- *   fires even if the model under-scores it — dormant insurance with the lgraph model, see [WakeMatcher]);
- *   above it the bypass is off and the keyword must clear this floor. A higher value mainly trades a bit
- *   of recall for a stricter floor; precision comes from the required [lead], not this number.
+ *   Precision comes from this declared lead and from the neural model's training, not from grammar gates.
+ * @param minConf detection threshold in [0, 1] for openWakeWord classifiers. Defaults to
+ *   [DEFAULT_MIN_CONF] when a plugin omits [com.portal.wake.wake.WakeContract.META_MIN_CONFIDENCE].
  */
 data class WakeWord(
     val id: String,
@@ -33,6 +30,9 @@ data class WakeWord(
     val phrase: String get() = lead?.let { "$it $keyword" } ?: keyword
 
     companion object {
+        /** Default detection threshold when a plugin omits [WakeContract.META_MIN_CONFIDENCE]. */
+        const val DEFAULT_MIN_CONF = 0.5
+
         private val WHITESPACE = Regex("\\s+")
 
         /** Split a phrase into its lowercase, whitespace-separated words — the one shared tokenization rule

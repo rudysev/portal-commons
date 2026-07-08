@@ -144,7 +144,7 @@ class PcmCaptureSession(
                 // Re-check running AFTER read() returns and BEFORE any callback: a stop() may have landed. A
                 // stopping session must deliver no further callback — otherwise, if the caller has already
                 // discarded this session and started a fresh one, this (old) thread's onFrame would run
-                // concurrently with the fresh thread's, racing a non-thread-safe consumer (e.g. Vosk).
+                // concurrently with the fresh thread's, racing a non-thread-safe consumer.
                 if (!running) break
                 // Idle watchdog: if no FULL frame was delivered for idleRebuildMs, the mic is stolen/half-dead.
                 // Measuring *delivered frames* (not raw bytes read) catches a clean 0, a sub-frame trickle (n>0
