@@ -41,8 +41,10 @@ interface WakeDetector {
     fun accept(buf: ByteArray, n: Int)
 
     /**
-     * Swap the active wake set without tearing down capture. Called on the capture thread (the engine defers
-     * the swap to a frame boundary). Detectors whose model is fixed per wake word may treat this as a no-op.
+     * Hot-swap wake words for detectors that resolve phrase models from **bundled assets** at runtime
+     * (portal-assistant). Detectors built with explicit [OpenWakeWordDetector.PhraseClassifierConfig]
+     * (portal-wake plugin models) must ignore this — rebuild the engine or call
+     * [OpenWakeWordDetector.updatePhraseModels] instead. Called on the capture thread at a frame boundary.
      */
     fun updateWakeWords(words: List<WakeWord>)
 

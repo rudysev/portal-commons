@@ -25,6 +25,7 @@ class WakeMicEngine(
     private val beforeStart: () -> Unit = {},
 ) {
     @Volatile private var pendingWakeWords: List<WakeWord>? = null
+    @Volatile private var pendingPhraseModels: List<OpenWakeWordDetector.PhraseClassifierConfig>? = null
     private val cooldown = FireCooldown(COOLDOWN_MS)
 
     private val events = object : WakeDetector.Events {
@@ -69,8 +70,14 @@ class WakeMicEngine(
         return session.start()
     }
 
+    /** Hot-swap bundled wake words (portal-assistant). See [WakeDetector.updateWakeWords]. */
     fun updateWakeWords(words: List<WakeWord>) {
         pendingWakeWords = words
+    }
+
+    /** Hot-swap explicit phrase classifier configs (portal-wake plugin/bundled mix). */
+    fun updatePhraseModels(configs: List<OpenWakeWordDetector.PhraseClassifierConfig>) {
+        pendingPhraseModels = configs
     }
 
     fun pause() {
@@ -89,19 +96,25 @@ class WakeMicEngine(
     }
 
     private fun onFrame(buf: ByteArray, n: Int) {
-        applyPendingWakeWords()
+        applyPendingUpdates()
         detectors.forEach { it.accept(buf, n) }
     }
 
-    private fun applyPendingWakeWords() {
-        val words = pendingWakeWords ?: return
-        pendingWakeWords = null
-        DebugLog.log("wake set changed → updating detector (${words.size} word(s))")
-        detectors.forEach { it.updateWakeWords(words) }
+    private fun applyPendingUpdates() {
+        pendingWakeWords?.let { words ->
+            pendingWakeWords = null
+            DebugLog.log("wake set changed → updating bundled phrase models (${words.size} word(s))")
+            detectors.forEach { it.updateWakeWords(words) }
+        }
+        pendingPhraseModels?.let { configs ->
+            pendingPhraseModels = null
+            DebugLog.log("wake set changed → updating explicit phrase models (${configs.size} classifier(s))")
+            detectors.filterIsInstance<OpenWakeWordDetector>().forEach { it.updatePhraseModels(configs) }
+        }
     }
 
     private fun handleWake(name: String, id: String, detail: String) {
-        if (!cooldown.tryFire(name, System.currentTimeMillis())) return
+        if (!cooldown.tryFire(id, System.currentTimeMillis())) return
         val tag = if (detectors.size > 1) " ($name)" else ""
         DebugLog.log("wake detected$tag → $id [$detail]")
         onWake(name, id, detail)
