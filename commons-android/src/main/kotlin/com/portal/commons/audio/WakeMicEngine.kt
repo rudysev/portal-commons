@@ -1,239 +1,107 @@
 package com.portal.commons.audio
 
 import android.content.Context
-import com.portal.commons.DebugLog
 import com.portal.commons.PcmCaptureSession
-import java.io.File
 
 /**
- * Wake **recognition policy** over the shared [PcmCaptureSession]: it owns the [WakeRecognizer], the
- * pre-ready frame buffer, and the post-fire cooldown, while the session owns the capture thread + device
- * lifecycle (open/read/robust stop/rebuild). A matched frame invokes `onWake(id)`.
+ * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
+ * captured frame to every configured [WakeDetector]. Recognition policy lives behind the [WakeDetector] seam.
  *
- * **Per-frame policy** ([onFrame], capture thread): while the model is still loading, ring-buffer frames
- * (so speech during init isn't lost); on the ready transition, flush them; then feed the recognizer with a
- * post-fire cooldown. **On (re)start** ([onStarted]) the recognizer is reset — which re-warms it — so the
- * first frame after a resume isn't garbled.
+ * Post-fire de-dupe is per wake id for [WakeMicConfig.wakeHandoffCooldownMs] so the ~1 handoff frame before
+ * capture actually pauses can't double-fire. Detectors query [WakeHandoffCooldown] via [WakeDetector.Host] to
+ * skip inference during that window.
  *
- * **Mic-slot handoff & phone calls are NOT handled here** anymore — `WakeService` drives [pause]/[start]
- * for both handoff and call stand-down via its capture gate. [pause] yields the slot: the session's reads
- * are non-blocking, so its stop deterministically exits the capture thread and releases the mic. [start]
- * reacquires it; the optional [beforeStart] hook runs first on each acquire — portal-wake passes its
- * `MicLiberator.freeMic` there to free the Portal's own wake services for the single mic slot, while the
- * assistant (foreground app) passes nothing (it needs no slot liberation).
+ * **Mic-slot handoff & phone calls are NOT handled here** — the consumer drives [pause]/[start] for handoff
+ * and call stand-down. [pause] yields the slot; [start] reacquires it, running [WakeMicConfig.beforeMicAcquire]
+ * first.
  *
- * Caller must hold RECORD_AUDIO. If the wake model is missing/unusable, [onUnavailable] fires.
+ * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
  */
 class WakeMicEngine(
-    private val context: Context,
-    wakeWords: List<WakeWord>,
-    onUnavailable: () -> Unit,
-    private val onWake: (String) -> Unit = {},
-    private val onError: (String) -> Unit = {},
-    private val onStopped: () -> Unit = {},
-    private val beforeStart: () -> Unit = {},
-    // null = bundled asset (portal-wake); a dir = a downloaded, already-unpacked model (portal-assistant gen2).
-    modelDir: File? = null,
+    context: Context,
+    private val config: WakeMicConfig,
 ) {
-    @Volatile private var recognizerReady = false // set when the model finishes unpacking (warmed)
-    private var wasRecognizerReady = false // capture-thread-only; detects ready transition for buffer flush
+    private val postToMain = WakeCallbackThreads.mainThreadPoster()
 
-    @Volatile private var pendingWakeWords: List<WakeWord>? = null // queued wake-set swap, applied on capture thread
-    private val idleReset = IdleResetPolicy() // capture-thread-only; when to bound the Vosk decode lattice
-    private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
-    private val recognizer = WakeRecognizer(
-        context,
-        wakeWords,
-        onReady = {
-            recognizerReady = true
-            DebugLog.log("wake recognizer ready")
-        },
-        onUnavailable = onUnavailable,
-        modelDir = modelDir,
+    private val eventHandler = WakeMicEventHandler(
+        handoffCooldownMs = config.wakeHandoffCooldownMs,
+        wakeConsumer = config.onWake,
+        onDetectorReady = config.onDetectorReady,
+        onDetectorUnavailable = config.onDetectorUnavailable,
+        log = config.log,
+        postToMain = postToMain,
     )
 
-    private var cooldownUntil = 0L // capture-thread-only; reset on each (re)start
+    private val detectorHost = object : WakeDetector.Host {
+        override val context: Context = context
+        override val wakeWords: List<WakeWord> = config.wakeWords
+        override val events: WakeDetector.Events = eventHandler
+        override val handoffCooldown: WakeHandoffCooldown = eventHandler
+    }
 
-    // Rebuildable: a wedged capture thread (start() refused) is recovered by discarding the session and
-    // building a fresh one (new device + thread, no shared state with the wedged one). start/pause/shutdown
-    // all run on the single controlling thread (WakeService's arbiter), so this needs no mutual exclusion;
-    // @Volatile is just cheap insurance that the reassignment is visible — it's a recovery-path mutable ref.
+    private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }
+
+    @Volatile private var pendingWakeWords: List<WakeWord>? = null
+
     @Volatile private var session = buildSession()
 
     private fun buildSession(): PcmCaptureSession {
         lateinit var built: PcmCaptureSession
         built = PcmCaptureSession(
             device = AudioRecordPcmDevice(),
-            onFrame = ::onFrame, // the moved post-read guard means a stopped session's thread never calls this
+            onFrame = ::onFrame,
             onStarted = ::onStarted,
-            // Forward stop/error only from the CURRENT session. A rebuilt-away (wedged) session's zombie still
-            // fires onStopped when its native call finally unblocks; WakeService's engineGeneration guard does
-            // NOT cover an internal session rebuild (same engine), so without this it would clear `capturing`
-            // while the fresh session is live. `session` is @Volatile, so the old capture thread sees the
-            // current reference and a stale session's callback is dropped.
-            onStopped = { if (session === built) onStopped() },
-            onError = { if (session === built) onError(it) },
-            log = { DebugLog.log(it) },
+            onStopped = { if (session === built) postToMain { config.onStopped() } },
+            onError = { if (session === built) postToMain { config.onError(it) } },
+            log = config.log,
             threadName = "wake-capture",
-            rebuildAfterReadFailures = REBUILD_AFTER_READ_FAILURES,
-            // Always-listening: recover a stolen/half-dead mic that returns no data (read==0) without ever
-            // erroring — otherwise the <0 rebuild above can't see it and wake goes silently deaf.
+            rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
             idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
         )
         return built
     }
 
-    /**
-     * Open the mic and start capturing (idempotent). Runs [beforeStart] first (portal-wake frees the Portal
-     * wake-word services there to own the single mic slot; the assistant no-ops). The session refuses to start only while a prior capture thread is still alive —
-     * which can happen only if a native open/stop/release hung. Recover by discarding it and starting a fresh
-     * session, so a stuck native mic call can't leave us permanently deaf. Returns whether a capture thread is now running.
-     * Callbacks are wired in [buildSession].
-     */
     fun start(): Boolean {
-        beforeStart()
+        config.beforeMicAcquire()
         if (session.start()) return true
-        // Refused → a previous capture thread is still alive: a native open/stop/release hung past the stop
-        // join. Discard it and start fresh on a new device/thread. The stale thread sees running=false so it
-        // delivers no further frame, and its eventual onStopped is dropped by the current-session gate (in
-        // buildSession), so it can't disturb the fresh capture.
-        DebugLog.log("wake capture wedged — rebuilding session and retrying")
+        config.log("wake capture wedged — rebuilding session and retrying")
         session = buildSession()
         return session.start()
     }
 
-    /**
-     * Swap the wake set (a plugin was installed/removed) **without restarting capture or reloading the
-     * model**. The swap is queued here and applied on the capture thread in [onFrame] at a frame boundary —
-     * never closing a native recognizer mid-`acceptWaveForm`. Cheap: only the grammar changes (see
-     * [WakeRecognizer.rebuildGrammar]). Replaces the old tear-down-and-recreate-the-engine path.
-     */
+    /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
     fun updateWakeWords(words: List<WakeWord>) {
         pendingWakeWords = words
     }
 
-    /** Release the mic so a consumer (or a call) can take the slot. Non-blocking reads make the session's stop deterministic: the capture thread exits promptly and the mic is freed. */
     fun pause() {
         session.stop()
-        DebugLog.log("mic paused (yielded slot)")
+        config.log("mic paused (yielded slot)")
     }
 
-    /** Full teardown: release the mic and close the wake model. */
-    fun shutdown() {
+    fun close() {
         session.stop()
-        recognizer.close()
+        detectors.forEach { it.close() }
     }
 
-    // ---- recognition policy (capture thread) -------------------------------------------------------
-
-    /** Reset recognizer state (re-warms) and the ready-transition flag on each (re)start. */
     private fun onStarted() {
-        wasRecognizerReady = false
-        cooldownUntil = 0L
-        recognizer.reset()
-        idleReset.noteFlushed(System.currentTimeMillis())
+        eventHandler.reset()
+        detectors.forEach { it.start() }
     }
 
     private fun onFrame(buf: ByteArray, n: Int) {
-        // Apply a queued wake-set swap on THIS (capture) thread, at a frame boundary — so the native
-        // recognizer is never closed mid-`acceptWaveForm` (see [WakeRecognizer.rebuildGrammar]).
         applyPendingWakeWords()
-        // While the model loads, ring-buffer recent frames so speech during init isn't lost.
-        if (!recognizerReady) {
-            preReadyBuffer.add(buf, n)
-            return
-        }
-        if (!wasRecognizerReady) {
-            wasRecognizerReady = true
-            flushPreReadyBuffer()
-        }
-        maybeIdleReset()
-        tryAcceptFrame(buf, n)
+        detectors.forEach { it.accept(buf, n) }
     }
 
-    /** Apply a queued [updateWakeWords] on the capture thread. No-op when nothing is pending. */
     private fun applyPendingWakeWords() {
         val words = pendingWakeWords ?: return
         pendingWakeWords = null
-        DebugLog.log("wake set changed → rebuilding grammar (${words.size} word(s))")
-        recognizer.rebuildGrammar(words)
-        idleReset.noteFlushed(System.currentTimeMillis()) // fresh recognizer — restart the idle-reset clock
+        config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
+        detectors.forEach { it.updateWakeWords(words) }
     }
 
-    /**
-     * Bound Vosk's native decode lattice. It grows (~3.8 MB/min observed) only while the recognizer isn't
-     * endpointing — with continuous audio the "current utterance" never finalizes. Natural endpoints normally
-     * flush it; this backstop [WakeRecognizer.reset] (which re-warms) covers the case where they stop.
-     * [IdleResetPolicy] owns the timing (see its KDoc): reset only in decoder silence, so it can't bisect an
-     * in-flight "hey …", with a hard cap for pathological continuous noise. Skipped during the post-fire
-     * cooldown so we never reset mid-handoff.
-     */
-    private fun maybeIdleReset() {
-        val now = System.currentTimeMillis()
-        if (now < cooldownUntil) return
-        val decision = idleReset.decide(now, recognizer::isMidUtterance)
-        if (decision == IdleResetPolicy.Decision.KEEP) return
-        recognizer.reset()
-        idleReset.noteFlushed(now)
-        // The forced variant is logged distinctly: it is the one remaining moment a reset can clip speech,
-        // so a vanished wake attempt next to this line in debug.txt is diagnosable.
-        when (decision) {
-            IdleResetPolicy.Decision.RESET -> DebugLog.log("idle reset (bounding Vosk lattice)")
-
-            IdleResetPolicy.Decision.FORCE_RESET ->
-                DebugLog.log("idle reset forced mid-decode (bounding Vosk lattice)")
-
-            IdleResetPolicy.Decision.KEEP -> {}
-        }
-    }
-
-    /** Feed buffered pre-ready frames to the recognizer once the model becomes ready. */
-    private fun flushPreReadyBuffer() {
-        val buffered = preReadyBuffer.drain()
-        if (buffered.isEmpty()) return
-        DebugLog.log("flushing ${buffered.size} pre-ready frame(s)")
-        for (frame in buffered) {
-            tryAcceptFrame(frame, frame.size)
-        }
-    }
-
-    /** Run one frame through Vosk; fire [onWake] on a match, log a near-miss (respects post-fire cooldown). */
-    private fun tryAcceptFrame(buf: ByteArray, n: Int) {
-        if (System.currentTimeMillis() < cooldownUntil) return
-        val outcome = recognizer.accept(buf, n) ?: return
-        // Any finalized decode means Kaldi flushed the lattice and started a fresh utterance — restart the
-        // idle-reset clock so the manual reset (and its re-warm-up) only runs when the decoder has gone a
-        // long time with no endpoint at all.
-        idleReset.noteFlushed(System.currentTimeMillis())
-        when (outcome) {
-            is WakeRecognizer.Outcome.Match -> {
-                // Log the decode (word + conf%) so a false fire shows exactly what Vosk heard, e.g.
-                // `wake detected → jarvis [hey(99) jarvis(62)]`.
-                DebugLog.log("wake detected → ${outcome.id} [${outcome.transcript}]")
-                cooldownUntil = System.currentTimeMillis() + COOLDOWN_MS
-                // No reset() on the fire path: cooldown blocks further accept()s, handoff pauses capture, and
-                // onStarted() re-warms on resume — so a match-path reset is redundant work on the hot path.
-                onWake(outcome.id)
-            }
-
-            is WakeRecognizer.Outcome.NearMiss -> {
-                // A wake keyword decoded but a gate rejected it — log what Vosk heard and which gate failed
-                // so a real miss leaves a trace, e.g. `near-miss [hey(72) jarvis(95)] rejected: 'hey' under 0.8 floor`.
-                DebugLog.log("near-miss [${outcome.transcript}] rejected: ${outcome.reason}")
-            }
-
-            is WakeRecognizer.Outcome.Flushed ->
-                // Keyword-free endpoint — usually just the clock restart above. Non-empty ones are logged
-                // as the dropped-lead diagnostic: if the leading "hey" of a wake is being finalized into
-                // the PREVIOUS utterance, it shows up here (`flushed final [hey(..)]`) immediately before
-                // the bare-keyword `no 'hey'` near-miss. Silence endpoints (empty transcript) stay quiet.
-                if (outcome.transcript.isNotEmpty()) DebugLog.log("flushed final [${outcome.transcript}]")
-        }
-    }
-
-    private companion object {
-        const val COOLDOWN_MS = 1_500L // ignore further matches briefly after a fire
-        const val PRE_READY_MAX_FRAMES = 80 // ~8 s of capture frames — must exceed model warm-up (~6 s)
-        const val REBUILD_AFTER_READ_FAILURES = 40 // rebuild the device after a short run of read errors
+    companion object {
+        const val MIC_READ_FAILURES_BEFORE_REBUILD = 40
     }
 }

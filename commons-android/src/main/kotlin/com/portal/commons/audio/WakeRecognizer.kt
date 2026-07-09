@@ -153,7 +153,7 @@ class WakeRecognizer(
 
     /**
      * Whether the decoder currently holds a non-empty partial hypothesis — i.e., it is mid-way through
-     * decoding sound into words. Used by [WakeMicEngine]'s idle-reset policy to avoid bounding the lattice
+     * decoding sound into words. Used by [VoskWakeDetector]'s idle-reset policy to avoid bounding the lattice
      * (a [reset], which discards that partial) in the middle of a possible wake utterance. False when the
      * model hasn't loaded or the native call fails — an unreadable partial must not block the memory bound.
      */

@@ -1,7 +1,7 @@
 package com.portal.commons.audio
 
 /**
- * Decides **when** [WakeMicEngine] should bound Vosk's native decode lattice with a [WakeRecognizer.reset].
+ * Decides **when** [VoskWakeDetector] should bound Vosk's native decode lattice with a [WakeRecognizer.reset].
  *
  * The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar recognizer can
  * go a long time without finalizing, and the never-flushed "current utterance" grows ~3.8 MB/min (measured
