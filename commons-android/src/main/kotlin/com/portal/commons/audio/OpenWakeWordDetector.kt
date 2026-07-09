@@ -228,6 +228,7 @@ class OpenWakeWordDetector private constructor(
         val flat = flattenNewestFeatureWindow()
         for (classifier in loadedClassifiers) {
             val score = classify(classifier, flat)
+            events.onScore(NAME, score)
             classifier.stepsSinceFire =
                 if (classifier.stepsSinceFire == Int.MAX_VALUE) classifier.stepsSinceFire
                 else classifier.stepsSinceFire + 1

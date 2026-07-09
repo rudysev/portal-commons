@@ -64,6 +64,9 @@ interface WakeDetector {
 
         /** A tuning-relevant non-fire. Logged verbatim by the engine. */
         fun onDiagnostic(name: String, message: String)
+
+        /** Streaming classifier score in [0, 1] — used by the benchmark harness for peak-score threshold sweeps. */
+        fun onScore(name: String, score: Float) {}
     }
 
     /** Builds a [WakeDetector] once the engine has wired up its [Events] sink. */
