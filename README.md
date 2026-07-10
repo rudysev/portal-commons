@@ -29,6 +29,7 @@ All package `com.portal.commons`.
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
 | `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s. Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
 | `WakeDetector` / `VoskWakeDetector` / `OpenWakeWordDetector` | Recognition seam; Vosk (grammar decode) and openWakeWord (ONNX neural KWS) implementations. Select via [WakeDetectors]. |
+| `WakeRouting` | Pure handoff policy when oWW and Vosk run in parallel — oWW owns its ids; Vosk shadows those and routes the rest. |
 
 ## Build / test (standalone)
 
