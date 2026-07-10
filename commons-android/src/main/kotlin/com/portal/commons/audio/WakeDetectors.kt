@@ -12,4 +12,7 @@ object WakeDetectors {
      *   downloaded model (portal-assistant on gen2).
      */
     fun vosk(modelDir: File? = null): WakeDetector.Factory = VoskWakeDetector.factory(modelDir)
+
+    /** openWakeWord detector reading bundled ONNX assets in `assets/oww/`. */
+    fun oww(): WakeDetector.Factory = OpenWakeWordDetector.factory()
 }
