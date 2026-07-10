@@ -38,8 +38,11 @@ kotlin {
 
 dependencies {
     implementation(project(":commons")) // PcmDevice seam + PcmCaptureFormat
-    // On-device wake-word recognition (WakeRecognizer/WakeMicEngine) — free, keyless, offline, no GMS.
+    // On-device wake-word recognition (Vosk + openWakeWord) — free, keyless, offline, no GMS.
     implementation("com.alphacephei:vosk-android:0.3.75")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303") // real org.json for the WakeRecognizer.parseResult test
+    // JVM ONNX Runtime for integration tests that exercise bundled assets on the dev/CI host.
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
 }
