@@ -142,6 +142,59 @@ class OpenWakeWordDetectorLifecycleTest {
         detector.close()
     }
 
+    @Test fun closeWaitsForInFlightAcceptBeforeTearingDown() {
+        val hooks = OpenWakeWordDetector.TestHooks()
+        val classifyEntered = CountDownLatch(1)
+        val releaseClassify = CountDownLatch(1)
+        hooks.classifyOverride = { wakeId ->
+            if (wakeId == "jarvis") {
+                classifyEntered.countDown()
+                releaseClassify.await(5, TimeUnit.SECONDS)
+            }
+            0.1f
+        }
+        wireAssetLoader(hooks)
+
+        val (factory, h) = OpenWakeWordDetector.testFactory(listOf(jarvisConfig()), hooks)
+        val detector = factory.create(testHost()) as OpenWakeWordDetector
+        waitUntil(15_000) { h.readyEvents.contains(true) }
+        detector.start()
+
+        val acceptError = AtomicBoolean(false)
+        val acceptDone = CountDownLatch(1)
+        Thread {
+            try {
+                val frame = silenceFrame()
+                repeat(30) { detector.accept(frame, frame.size) }
+            } catch (_: Throwable) {
+                acceptError.set(true)
+            } finally {
+                acceptDone.countDown()
+            }
+        }.start()
+
+        assumeTrue(classifyEntered.await(10, TimeUnit.SECONDS))
+
+        val closeStarted = AtomicBoolean(false)
+        val closeDone = CountDownLatch(1)
+        Thread {
+            closeStarted.set(true)
+            detector.close()
+            closeDone.countDown()
+        }.start()
+
+        waitUntil(2_000) { closeStarted.get() }
+        Thread.sleep(100)
+        assertFalse("close must not finish while accept is in flight", closeDone.await(0, TimeUnit.MILLISECONDS))
+        assertFalse("classifier must stay open until accept returns", h.onClassifierClosed.contains("jarvis"))
+
+        releaseClassify.countDown()
+        assertTrue(acceptDone.await(5, TimeUnit.SECONDS))
+        assertTrue(closeDone.await(5, TimeUnit.SECONDS))
+        assertFalse("in-flight accept must not see a torn-down session", acceptError.get())
+        assertTrue(h.onClassifierClosed.contains("jarvis"))
+    }
+
     @Test fun normalPathBuffersPreReadyThenAcceptsWithoutWake() {
         val hooks = OpenWakeWordDetector.TestHooks()
         val diagnostics = mutableListOf<String>()
@@ -224,6 +277,45 @@ class OpenWakeWordDetectorLifecycleTest {
         )
         // Second ready means the consumer can resume after clearing the wake set.
         assertEquals(listOf(true, true), h.readyEvents.toList())
+        detector.close()
+    }
+
+    @Test fun emptySwapBuffersThenFlushOnRestoreWithoutStart() {
+        val hooks = OpenWakeWordDetector.TestHooks()
+        hooks.classifyOverride = { 0.95f }
+        wireAssetLoader(hooks)
+        val wakes = mutableListOf<WakeEvent>()
+        val diagnostics = mutableListOf<String>()
+        val unavailable = mutableListOf<String>()
+        val ready = mutableListOf<String>()
+        val (factory, h) = OpenWakeWordDetector.testFactory(listOf(jarvisConfig()), hooks)
+        val detector = factory.create(
+            testHost(recordingEvents(ready = ready, unavailable = unavailable, wakes = wakes, diagnostics = diagnostics)),
+        ) as OpenWakeWordDetector
+
+        waitUntil(15_000) { h.readyEvents.contains(true) }
+        detector.start()
+        val frame = silenceFrame()
+        // Prime accept while ready so a naive wasReady latch would stick true across the swap.
+        detector.accept(frame, frame.size)
+        wakes.clear()
+        diagnostics.clear()
+
+        detector.updatePhraseModels(emptyList())
+        waitUntil(5_000) { unavailable.isNotEmpty() }
+
+        // Buffer PCM while unavailable (no start() before restore).
+        repeat(3) { detector.accept(frame, frame.size) }
+
+        detector.updatePhraseModels(listOf(jarvisConfig()))
+        waitUntil(5_000) { ready.size >= 2 }
+
+        detector.accept(frame, frame.size)
+        assertTrue(
+            "PCM buffered while unavailable must flush after ready is restored without start()",
+            diagnostics.any { it.contains("pre-ready") },
+        )
+        assertTrue(wakes.isNotEmpty())
         detector.close()
     }
 

@@ -31,7 +31,8 @@ import java.util.ArrayDeque
  * fire from the model thread.
  *
  * **Threading.** [start]/[accept] run on the engine's capture thread. All session open/close/swap runs on
- * the model thread; capture reads volatile snapshots only. [close] joins the model thread then tears down.
+ * the model thread; capture reads volatile snapshots only. [close] drains in-flight [accept] then joins
+ * the model thread and tears down.
  */
 class OpenWakeWordDetector private constructor(
     private val host: WakeDetector.Host,
@@ -82,7 +83,6 @@ class OpenWakeWordDetector private constructor(
     @Volatile private var closed = false
     /** True once [loadInitial] has finished (ready or unavailable) — gates hot-swap vs stash-only. */
     @Volatile private var initialLoadFinished = false
-    private var wasReady = false
     private var streamingSeeded = false
 
     /** Latest bundled wake set from [updateWakeWords]; falls back to [WakeDetector.Host.wakeWords]. */
@@ -223,7 +223,6 @@ class OpenWakeWordDetector private constructor(
     }
 
     override fun start() {
-        wasReady = false
         streamingSeeded = false
         resetStreamingState()
     }
@@ -236,10 +235,10 @@ class OpenWakeWordDetector private constructor(
         }
         captureGuard.enterCapture()
         try {
-            if (!wasReady) {
-                wasReady = true
-                flushPreReadyBuffer()
-            }
+            // Re-check after enter: [close] may have won the race and be waiting on [awaitIdle].
+            if (closed) return
+            // Always drain — covers first ready and ready restored after an empty swap without start().
+            flushPreReadyBuffer()
             if (handoffCooldown.isAnyCoolingDown()) return
             if (loadedClassifiers.isEmpty()) return
             processFrame(buf, n)
@@ -322,6 +321,9 @@ class OpenWakeWordDetector private constructor(
 
     override fun close() {
         closed = true
+        // Capture may still be inside accept() after PcmCaptureSession.stop()'s bounded join times out.
+        // Drain in-flight inference before closing OrtSessions (shared mel/embed + classifiers).
+        captureGuard.awaitIdle(CAPTURE_IDLE_DRAIN_MS)
         modelThread.submitAndJoin(MODEL_THREAD_JOIN_MS) { tearDownOnModelThread() }
         modelThread.shutdown(MODEL_THREAD_JOIN_MS)
         ready = false
@@ -683,5 +685,8 @@ class OpenWakeWordDetector private constructor(
         private const val FEAT_MAX = 32
         private const val REFRACTORY_STEPS = 20
         private const val MODEL_THREAD_JOIN_MS = 30_000L
+
+        /** Max wait for an in-flight [accept] before tearing down OrtSessions in [close]. */
+        internal const val CAPTURE_IDLE_DRAIN_MS = 5_000L
     }
 }
