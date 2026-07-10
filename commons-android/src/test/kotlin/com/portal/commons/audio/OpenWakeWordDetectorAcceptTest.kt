@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Behavioral parity tests for openWakeWord accept gating — mirrors the Vosk pre-seam policy without ONNX.
+ * Behavioral parity tests for openWakeWord accept gating — pre-seam policy without ONNX.
  */
 class OpenWakeWordDetectorAcceptTest {
 

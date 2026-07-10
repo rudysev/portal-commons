@@ -97,7 +97,7 @@ class WakeMicEngine(
     private fun applyPendingWakeWords() {
         val words = pendingWakeWords ?: return
         pendingWakeWords = null
-        config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
+        config.log("wake set changed → updating detectors (${words.size} word(s))")
         detectors.forEach { it.updateWakeWords(words) }
     }
 

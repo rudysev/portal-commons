@@ -39,7 +39,7 @@ interface WakeDetector {
 
     /**
      * Hot-swap the active wake set without tearing down capture. Called on the capture thread at a frame
-     * boundary. Detectors that cannot rebuild grammar in place may no-op.
+     * boundary. Detectors that cannot rebuild the active phrase set in place may no-op.
      */
     fun updateWakeWords(words: List<WakeWord>)
 
