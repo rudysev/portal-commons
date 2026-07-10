@@ -13,26 +13,27 @@ package com.portal.commons.audio
  * registers), not hardcoded here, so an app can register "hey jarvis", "hi bob", or a bare "computer"
  * (no lead). The full [phrase] is derived from the two.
  *
- * @param id      stable key reported back on a match (e.g. "jarvis", "alexa").
- * @param keyword the salient word the matcher spots (e.g. "jarvis").
- * @param lead    the word that must precede [keyword] (e.g. "hey", "hi"), or null when none is required.
+ * @param id              stable key reported back on a match (e.g. "jarvis", "alexa").
+ * @param keyword         the salient word the matcher spots (e.g. "jarvis").
+ * @param lead            the word that must precede [keyword] (e.g. "hey", "hi"), or null when none is required.
  *   Precision comes from this declared lead, not a hardcoded "hey" — see [WakeMatcher].
- * @param minConf keyword-confidence floor to accept this wake word. At or below
- *   [WakeMatcher.BASELINE_CONF] the lenient clean-phrase bypass applies (a clean short "<lead> <keyword>"
- *   fires even if the model under-scores it — dormant insurance with the lgraph model, see [WakeMatcher]);
- *   above it the bypass is off and the keyword must clear this floor. A higher value mainly trades a bit
- *   of recall for a stricter floor; precision comes from the required [lead], not this number.
+ * @param minConf         Vosk keyword-confidence floor — see [WakeMatcher].
+ * @param scoreThreshold  openWakeWord classifier score in [0, 1] required to fire (independent of [minConf]).
  */
 data class WakeWord(
     val id: String,
     val keyword: String,
     val lead: String?,
     val minConf: Double,
+    val scoreThreshold: Double = DEFAULT_SCORE_THRESHOLD,
 ) {
     /** The full spoken phrase / grammar entry, derived from [lead] + [keyword] (e.g. "hey jarvis"). */
     val phrase: String get() = lead?.let { "$it $keyword" } ?: keyword
 
     companion object {
+        /** Default openWakeWord classifier threshold when a plugin omits `com.portal.wake.min_confidence`. */
+        const val DEFAULT_SCORE_THRESHOLD = 0.5
+
         private val WHITESPACE = Regex("\\s+")
 
         /** Split a phrase into its lowercase, whitespace-separated words — the one shared tokenization rule
@@ -50,7 +51,12 @@ data class WakeWord(
          * (lead is a single token by design). Returns null when [phrase] is blank / whitespace-only (no
          * usable word) — the single guard, so callers never have to pre-check and a bad declaration is dropped.
          */
-        fun fromPhrase(phrase: String, id: String? = null, minConf: Double): WakeWord? {
+        fun fromPhrase(
+            phrase: String,
+            id: String? = null,
+            minConf: Double = WakeMatcher.BASELINE_CONF,
+            scoreThreshold: Double = DEFAULT_SCORE_THRESHOLD,
+        ): WakeWord? {
             val words = tokenize(phrase)
             val keyword = words.lastOrNull() ?: return null
             val lead = if (words.size >= 2) words[words.size - 2] else null
@@ -59,6 +65,7 @@ data class WakeWord(
                 keyword = keyword,
                 lead = lead,
                 minConf = minConf,
+                scoreThreshold = scoreThreshold,
             )
         }
     }

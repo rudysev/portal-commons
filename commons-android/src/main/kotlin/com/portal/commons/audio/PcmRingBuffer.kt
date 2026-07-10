@@ -1,8 +1,8 @@
 package com.portal.commons.audio
 
 /**
- * Fixed-capacity FIFO of recent PCM frames. Used to retain speech spoken while the Vosk model is still
- * loading so it can be fed to the recognizer once ready (instead of being discarded).
+ * Fixed-capacity FIFO of recent PCM frames. Retains speech spoken while a wake model is still loading
+ * (Vosk or openWakeWord) so it can be fed to the detector once ready (instead of being discarded).
  */
 internal class PcmRingBuffer(private val maxFrames: Int) {
 
