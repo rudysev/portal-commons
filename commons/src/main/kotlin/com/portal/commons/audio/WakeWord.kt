@@ -5,13 +5,10 @@ package com.portal.commons.audio
  *
  * This is intentionally decoupled from *what happens* on a match — routing/handoff lives in the consuming
  * app (e.g. portal-wake's WakeTarget), which pairs a [WakeWord] with the app that should be launched.
- * Keeping the matcher target-agnostic is what lets wake words come from anywhere (built-in defaults
- * today, runtime-discovered plugin apps tomorrow) without touching the recognizer.
  *
- * A wake word is a [keyword] (the salient word the matcher spots) optionally preceded by a [lead] word
+ * A wake word is a [keyword] (the salient word the model listens for) optionally preceded by a [lead] word
  * (e.g. "hey", "hi"). The lead is **declared by the plugin** (it's the leading word of the phrase it
- * registers), not hardcoded here, so an app can register "hey jarvis", "hi bob", or a bare "computer"
- * (no lead). The full [phrase] is derived from the two.
+ * registers), not hardcoded here.
  *
  * @param id              stable key reported back on a match (e.g. "jarvis", "alexa").
  * @param keyword         the salient word the matcher spots (e.g. "jarvis").
@@ -19,6 +16,7 @@ package com.portal.commons.audio
  *   Precision comes from this declared lead, not a hardcoded "hey" — see [WakeMatcher].
  * @param minConf         Vosk keyword-confidence floor — see [WakeMatcher].
  * @param scoreThreshold  openWakeWord classifier score in [0, 1] required to fire (independent of [minConf]).
+ *   Maps to `com.portal.wake.min_confidence` in plugin manifests when only one value is supplied.
  */
 data class WakeWord(
     val id: String,
@@ -27,7 +25,7 @@ data class WakeWord(
     val minConf: Double,
     val scoreThreshold: Double = DEFAULT_SCORE_THRESHOLD,
 ) {
-    /** The full spoken phrase / grammar entry, derived from [lead] + [keyword] (e.g. "hey jarvis"). */
+    /** The full spoken phrase, derived from [lead] + [keyword] (e.g. "hey jarvis"). */
     val phrase: String get() = lead?.let { "$it $keyword" } ?: keyword
 
     companion object {
@@ -36,21 +34,8 @@ data class WakeWord(
 
         private val WHITESPACE = Regex("\\s+")
 
-        /** Split a phrase into its lowercase, whitespace-separated words — the one shared tokenization rule
-         *  ([fromPhrase] and the registry's word-count both use it, so they can't drift). */
         fun tokenize(phrase: String): List<String> = phrase.trim().lowercase().split(WHITESPACE).filter { it.isNotEmpty() }
 
-        /**
-         * Derive a [WakeWord] from a full spoken [phrase] — the single place phrase→(keyword, lead) lives,
-         * so plugin declarations and the built-in defaults can never derive differently. The **keyword** is
-         * the last word and the **lead** is the word immediately before it (null when the phrase is a single
-         * word). [id] defaults to the keyword when blank/omitted. Lowercased and whitespace-trimmed.
-         *
-         * "hey jarvis" → keyword "jarvis", lead "hey"; "hi bob" → keyword "bob", lead "hi";
-         * "computer" → keyword "computer", lead null. A phrase with >2 words keeps only the last two
-         * (lead is a single token by design). Returns null when [phrase] is blank / whitespace-only (no
-         * usable word) — the single guard, so callers never have to pre-check and a bad declaration is dropped.
-         */
         fun fromPhrase(
             phrase: String,
             id: String? = null,

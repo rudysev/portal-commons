@@ -250,7 +250,7 @@ class PcmCaptureSessionTest {
     fun deliversNoFrameAfterStop() {
         // A frame that "arrives" exactly as stop() lands must NOT be delivered: stop() sets running=false, and
         // the loop's post-read gate drops the in-flight frame. This lets a caller safely discard a stopped
-        // session and start a fresh one without the old thread's onFrame racing the new one (e.g. Vosk).
+        // session and start a fresh one without the old thread's onFrame racing the new one (e.g. wake detector).
         val frames = AtomicInteger()
         val stopped = CountDownLatch(1)
         val fake = BlockingFake()

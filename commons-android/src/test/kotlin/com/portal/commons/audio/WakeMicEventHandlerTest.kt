@@ -24,22 +24,22 @@ class WakeMicEventHandlerTest {
 
     @Test fun wakeLogAlwaysIncludesDetectorId() {
         val h = handler()
-        h.onWake(WakeEvent("vosk", "jarvis", "hey(99) jarvis(62)"))
-        assertEquals(listOf("wake detected (vosk) → jarvis [hey(99) jarvis(62)]"), log)
-        assertEquals(listOf(WakeEvent("vosk", "jarvis", "hey(99) jarvis(62)")), wakes)
+        h.onWake(WakeEvent("oww", "jarvis", "score=0.95"))
+        assertEquals(listOf("wake detected (oww) → jarvis [score=0.95]"), log)
+        assertEquals(listOf(WakeEvent("oww", "jarvis", "score=0.95")), wakes)
     }
 
     @Test fun diagnosticLogAlwaysIncludesDetectorId() {
         val h = handler()
-        h.onDiagnostic("vosk", "near-miss [hey(72) jarvis(95)] rejected: floor")
-        assertEquals(listOf("(vosk) near-miss [hey(72) jarvis(95)] rejected: floor"), log)
+        h.onDiagnostic("oww", "near-miss jarvis score=0.45 threshold=0.50")
+        assertEquals(listOf("(oww) near-miss jarvis score=0.45 threshold=0.50"), log)
     }
 
     @Test fun onReadyForwardsDetectorId() {
         val h = handler()
-        h.onReady("vosk")
-        assertEquals(listOf("wake detector ready (vosk)"), log)
-        assertEquals(listOf("vosk"), readyDetectorIds)
+        h.onReady("oww")
+        assertEquals(listOf("wake detector ready (oww)"), log)
+        assertEquals(listOf("oww"), readyDetectorIds)
     }
 
     @Test fun onReadyConsumerRunsViaMainPoster() {
@@ -52,21 +52,21 @@ class WakeMicEventHandlerTest {
             log = {},
             postToMain = { it.run() },
         )
-        h.onReady("vosk")
+        h.onReady("oww")
         assertTrue(consumerRan)
     }
 
     @Test fun secondFireWithinHandoffCooldownIsSuppressed() {
         val h = handler()
-        h.onWake(WakeEvent("vosk", "jarvis", "a"))
+        h.onWake(WakeEvent("oww", "jarvis", "a"))
         nowMs = 500L
-        h.onWake(WakeEvent("vosk", "jarvis", "b"))
+        h.onWake(WakeEvent("oww", "jarvis", "b"))
         assertEquals(1, wakes.size)
     }
 
     @Test fun isCoolingDownTrueUntilWindowElapses() {
         val h = handler()
-        h.onWake(WakeEvent("vosk", "jarvis", "score"))
+        h.onWake(WakeEvent("oww", "jarvis", "score"))
         nowMs = 500L
         assertTrue(h.isCoolingDown("jarvis"))
         assertFalse(h.isCoolingDown("alexa"))
@@ -77,7 +77,7 @@ class WakeMicEventHandlerTest {
     @Test fun isAnyCoolingDownTrueAfterAnyFire() {
         val h = handler()
         assertFalse(h.isAnyCoolingDown())
-        h.onWake(WakeEvent("vosk", "jarvis", "a"))
+        h.onWake(WakeEvent("oww", "jarvis", "a"))
         nowMs = 500L
         assertTrue(h.isAnyCoolingDown())
         h.reset()
@@ -86,20 +86,20 @@ class WakeMicEventHandlerTest {
 
     @Test fun resetClearsHandoffCooldown() {
         val h = handler()
-        h.onWake(WakeEvent("vosk", "jarvis", "a"))
+        h.onWake(WakeEvent("oww", "jarvis", "a"))
         nowMs = 500L
         assertTrue(h.isAnyCoolingDown())
         h.reset()
         assertFalse(h.isAnyCoolingDown())
-        h.onWake(WakeEvent("vosk", "jarvis", "again"))
+        h.onWake(WakeEvent("oww", "jarvis", "again"))
         assertEquals(2, wakes.size)
     }
 
     @Test fun wakeIdsCoolDownIndependently() {
         val h = handler()
-        h.onWake(WakeEvent("vosk", "jarvis", "a"))
+        h.onWake(WakeEvent("oww", "jarvis", "a"))
         nowMs = 500L
-        h.onWake(WakeEvent("vosk", "alexa", "b"))
+        h.onWake(WakeEvent("oww", "alexa", "b"))
         assertEquals(2, wakes.size)
     }
 }

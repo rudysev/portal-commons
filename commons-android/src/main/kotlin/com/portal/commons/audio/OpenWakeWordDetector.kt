@@ -80,11 +80,16 @@ class OpenWakeWordDetector private constructor(
 
     @Volatile private var ready = false
     @Volatile private var closed = false
+    /** True once [loadInitial] has finished (ready or unavailable) — gates hot-swap vs stash-only. */
+    @Volatile private var initialLoadFinished = false
     private var wasReady = false
     private var streamingSeeded = false
 
     /** Latest bundled wake set from [updateWakeWords]; falls back to [WakeDetector.Host.wakeWords]. */
     @Volatile private var latestBundledWords: List<WakeWord>? = null
+
+    /** Latest explicit configs from [updatePhraseModels]; falls back to the construction-time list. */
+    @Volatile private var latestExplicitConfigs: List<PhraseClassifierConfig>? = null
 
     private val modelThread = OwwModelThread()
     private val captureGuard = OwwCaptureGuard(modelThread)
@@ -104,25 +109,36 @@ class OpenWakeWordDetector private constructor(
 
     private fun bundledWords(): List<WakeWord> = latestBundledWords ?: host.wakeWords
 
+    private fun explicitConfigs(): List<PhraseClassifierConfig> = latestExplicitConfigs ?: phraseConfigs
+
     private fun loadInitial() {
         if (closed) return
-        val okShared = runCatching { buildShared() }.getOrDefault(false)
-        if (!okShared || closed) {
-            tearDownOnModelThread()
-            events.onUnavailable(ID)
-            return
+        try {
+            val okShared = runCatching { buildShared() }.getOrDefault(false)
+            if (!okShared || closed) {
+                tearDownOnModelThread()
+                events.onUnavailable(ID)
+                return
+            }
+            // Read the wake/config set as late as possible so a pre-ready hot-swap is not lost.
+            testHooks?.beforeResolveConfigs?.invoke()
+            if (closed) {
+                tearDownOnModelThread()
+                return
+            }
+            val toInstall = when (modelSource) {
+                ModelSource.BUNDLED -> buildBundledPhraseConfigs(context, bundledWords())
+                ModelSource.EXPLICIT -> explicitConfigs()
+            }
+            val ok = runCatching { installClassifiersOnModelThread(toInstall) }.getOrDefault(false)
+            if (closed) {
+                tearDownOnModelThread()
+                return
+            }
+            publishReady(ok)
+        } finally {
+            initialLoadFinished = true
         }
-        // Read bundled words as late as possible so a pre-ready [updateWakeWords] is not lost.
-        val toInstall = when (modelSource) {
-            ModelSource.BUNDLED -> buildBundledPhraseConfigs(context, bundledWords())
-            ModelSource.EXPLICIT -> phraseConfigs
-        }
-        val ok = runCatching { installClassifiersOnModelThread(toInstall) }.getOrDefault(false)
-        if (closed) {
-            tearDownOnModelThread()
-            return
-        }
-        publishReady(ok)
     }
 
     private fun publishReady(ok: Boolean) {
@@ -144,18 +160,27 @@ class OpenWakeWordDetector private constructor(
 
     private fun buildShared(): Boolean {
         tearDownSharedOnModelThread()
-        val e = OrtEnvironment.getEnvironment()
-        val opts = OrtSession.SessionOptions().apply { setIntraOpNumThreads(1) }
-        val mel = e.createSession(asset("$assetDir/$MEL_ASSET"), opts)
-        val emb = e.createSession(asset("$assetDir/$EMB_ASSET"), opts)
-        shared = SharedModels(
-            env = e,
-            melSess = mel,
-            embSess = emb,
-            melInName = mel.inputNames.first(),
-            embInName = emb.inputNames.first(),
-        )
-        return true
+        var mel: OrtSession? = null
+        var emb: OrtSession? = null
+        return try {
+            val e = OrtEnvironment.getEnvironment()
+            val opts = OrtSession.SessionOptions().apply { setIntraOpNumThreads(1) }
+            mel = e.createSession(asset("$assetDir/$MEL_ASSET"), opts)
+            emb = e.createSession(asset("$assetDir/$EMB_ASSET"), opts)
+            shared = SharedModels(
+                env = e,
+                melSess = mel,
+                embSess = emb,
+                melInName = mel.inputNames.first(),
+                embInName = emb.inputNames.first(),
+            )
+            true
+        } catch (_: Throwable) {
+            runCatching { mel?.close() }
+            runCatching { emb?.close() }
+            shared = null
+            false
+        }
     }
 
     /**
@@ -245,19 +270,25 @@ class OpenWakeWordDetector private constructor(
 
     /**
      * Hot-swap bundled phrase models. Only for detectors created via [factory] (no-arg).
-     * Detectors with explicit [PhraseClassifierConfig] ignore this — call [updatePhraseModels] instead.
+     * Detectors with explicit [PhraseClassifierConfig] ignore this — [WakeMicEngine.updateWakeWords]
+     * cannot supply ONNX bytes; call [updatePhraseModels] on the detector instance instead.
      */
     override fun updateWakeWords(words: List<WakeWord>) {
         if (modelSource != ModelSource.BUNDLED) return
         latestBundledWords = words
-        if (!ready) return
+        if (!initialLoadFinished) return // loadInitial reads [bundledWords]
         queueClassifierSwap(buildBundledPhraseConfigs(context, words), bundledSwap = true)
     }
 
-    /** Hot-swap explicit phrase classifier configs (portal-wake plugin + bundled mix). */
+    /**
+     * Hot-swap explicit phrase classifier configs (portal-wake plugin + bundled mix).
+     * Safe to call before the initial load finishes — the latest set is applied when load completes.
+     */
     fun updatePhraseModels(configs: List<PhraseClassifierConfig>) {
         if (modelSource != ModelSource.EXPLICIT) return
-        if (!ready) return
+        latestExplicitConfigs = configs
+        phraseConfigs = configs
+        if (!initialLoadFinished) return // loadInitial reads [explicitConfigs]
         queueClassifierSwap(configs, bundledSwap = false)
     }
 
@@ -268,7 +299,9 @@ class OpenWakeWordDetector private constructor(
                 val previous = loadedClassifiers
                 loadedClassifiers = emptyList()
                 captureGuard.retireOnModelThread(previous)
-                events.onUnavailable(ID)
+                val wasReady = ready
+                ready = false
+                if (wasReady) events.onUnavailable(ID)
                 return@submit
             }
             if (!installClassifiersOnModelThread(configs)) {
@@ -278,6 +311,11 @@ class OpenWakeWordDetector private constructor(
                     "oww: phrase model swap failed — keeping previous models"
                 }
                 events.onDiagnostic(ID, message)
+            } else if (!ready) {
+                // Restored models after an empty/unavailable swap (or first successful install post-load).
+                ready = true
+                testHooks?.readyEvents?.add(true)
+                events.onReady(ID)
             }
         }
     }
@@ -367,11 +405,8 @@ class OpenWakeWordDetector private constructor(
     }
 
     private fun melspec(models: SharedModels): Array<FloatArray> {
-        val len = historyLen
-        val f = FloatArray(len)
-        val startIdx = RAW_CONTEXT - len
-        for (i in 0 until len) f[i] = history[startIdx + i].toFloat()
-        OnnxTensor.createTensor(models.env, FloatBuffer.wrap(f), longArrayOf(1, len.toLong())).use { t ->
+        val f = historyToFloat(history, historyLen)
+        OnnxTensor.createTensor(models.env, FloatBuffer.wrap(f), longArrayOf(1, f.size.toLong())).use { t ->
             models.melSess.run(mapOf(models.melInName to t)).use { r ->
                 val out = r[0] as OnnxTensor
                 val T = melTimeSteps(out.info.shape)
@@ -446,15 +481,7 @@ class OpenWakeWordDetector private constructor(
     }
 
     private fun pushHistory(src: ShortArray, off: Int, len: Int) {
-        if (len >= RAW_CONTEXT) {
-            System.arraycopy(src, off + len - RAW_CONTEXT, history, 0, RAW_CONTEXT)
-            historyLen = RAW_CONTEXT
-            return
-        }
-        val keep = minOf(historyLen, RAW_CONTEXT - len)
-        if (keep > 0) System.arraycopy(history, historyLen - keep, history, 0, keep)
-        System.arraycopy(src, off, history, keep, len)
-        historyLen = keep + len
+        historyLen = pushHistorySamples(history, historyLen, src, off, len)
     }
 
     private fun asset(name: String): ByteArray =
@@ -486,6 +513,8 @@ class OpenWakeWordDetector private constructor(
     /** Injectable hooks for unit tests — never set in production factories. */
     internal class TestHooks {
         var beforePublishReady: (() -> Unit)? = null
+        /** Invoked on the model thread after shared models load, before phrase configs are resolved. */
+        var beforeResolveConfigs: (() -> Unit)? = null
         var classifyOverride: ((wakeId: String) -> Float?)? = null
         var assetLoader: ((String) -> ByteArray)? = null
         val onClassifierClosed = java.util.Collections.synchronizedList(mutableListOf<String>())
@@ -524,13 +553,44 @@ class OpenWakeWordDetector private constructor(
             (budgetMs + PcmCaptureFormat.FRAME_MS - 1) / PcmCaptureFormat.FRAME_MS
 
         /**
-         * The wake id the bundled hey-jarvis model owns within a discovered set — used by portal-wake's
-         * dual-detector routing so Vosk suppression and oww ownership can't drift.
+         * The wake id the bundled hey-jarvis model owns within a discovered set.
          */
         fun ownedWakeId(words: List<WakeWord>): String? =
             (words.firstOrNull { it.phrase == WAKE_PHRASE } ?: words.firstOrNull { it.id == WAKE_ID })?.id
 
         internal fun melTimeSteps(shape: LongArray): Int = if (shape.size >= 2) shape[shape.size - 2].toInt() else 0
+
+        /**
+         * Left-align [len] new samples into [history], dropping the oldest when full.
+         * Returns the new occupied length. [history] is always packed at index 0.
+         */
+        internal fun pushHistorySamples(
+            history: ShortArray,
+            historyLen: Int,
+            src: ShortArray,
+            off: Int,
+            len: Int,
+        ): Int {
+            val capacity = history.size
+            if (len >= capacity) {
+                System.arraycopy(src, off + len - capacity, history, 0, capacity)
+                return capacity
+            }
+            val keep = minOf(historyLen, capacity - len)
+            if (keep > 0) System.arraycopy(history, historyLen - keep, history, 0, keep)
+            System.arraycopy(src, off, history, keep, len)
+            return keep + len
+        }
+
+        /** Convert the occupied prefix of a left-aligned [history] buffer to floats for the mel model. */
+        internal fun historyToFloat(history: ShortArray, historyLen: Int): FloatArray {
+            require(historyLen in 0..history.size) {
+                "historyLen $historyLen out of range for buffer size ${history.size}"
+            }
+            val f = FloatArray(historyLen)
+            for (i in 0 until historyLen) f[i] = history[i].toFloat()
+            return f
+        }
 
         internal fun pcm16ToShorts(buf: ByteArray, n: Int): ShortArray {
             require(n % 2 == 0) { "PCM16 byte count must be even, got $n" }

@@ -197,4 +197,103 @@ class OpenWakeWordDetectorLifecycleTest {
         assertEquals(0.31f, threshold)
         assertFalse(threshold == word.minConf.toFloat())
     }
+
+    @Test fun emptySwapThenRestoreReSignalsReady() {
+        val hooks = OpenWakeWordDetector.TestHooks()
+        wireAssetLoader(hooks)
+        val ready = mutableListOf<String>()
+        val unavailable = mutableListOf<String>()
+        val (factory, h) = OpenWakeWordDetector.testFactory(listOf(jarvisConfig()), hooks)
+        val detector = factory.create(
+            testHost(recordingEvents(ready = ready, unavailable = unavailable)),
+        ) as OpenWakeWordDetector
+
+        waitUntil(15_000) { h.readyEvents.contains(true) }
+        assertEquals(listOf(OpenWakeWordDetector.ID), ready)
+
+        detector.updatePhraseModels(emptyList())
+        waitUntil(5_000) { unavailable.isNotEmpty() }
+        assertEquals(listOf(OpenWakeWordDetector.ID), unavailable)
+
+        detector.updatePhraseModels(listOf(jarvisConfig()))
+        waitUntil(5_000) { ready.size >= 2 }
+
+        assertEquals(
+            listOf(OpenWakeWordDetector.ID, OpenWakeWordDetector.ID),
+            ready,
+        )
+        // Second ready means the consumer can resume after clearing the wake set.
+        assertEquals(listOf(true, true), h.readyEvents.toList())
+        detector.close()
+    }
+
+    @Test fun updatePhraseModelsBeforeReadyIsAppliedOnLoad() {
+        val hooks = OpenWakeWordDetector.TestHooks()
+        val reachedResolve = CountDownLatch(1)
+        val allowResolve = CountDownLatch(1)
+        hooks.beforeResolveConfigs = {
+            reachedResolve.countDown()
+            allowResolve.await(5, TimeUnit.SECONDS)
+        }
+        hooks.classifyOverride = { wakeId -> if (wakeId == "alexa") 0.95f else 0.1f }
+        wireAssetLoader(hooks)
+
+        val wakes = mutableListOf<WakeEvent>()
+        val (factory, h) = OpenWakeWordDetector.testFactory(listOf(jarvisConfig()), hooks)
+        val detector = factory.create(testHost(recordingEvents(wakes = wakes))) as OpenWakeWordDetector
+
+        assumeTrue(reachedResolve.await(10, TimeUnit.SECONDS))
+        // Stash alexa while shared models exist but phrase configs have not been read yet.
+        detector.updatePhraseModels(
+            listOf(
+                OpenWakeWordDetector.PhraseClassifierConfig(
+                    "alexa",
+                    assetBytes("alexa_v0.1.onnx"),
+                    0.5f,
+                ),
+            ),
+        )
+        allowResolve.countDown()
+        waitUntil(15_000) { h.readyEvents.contains(true) }
+
+        detector.start()
+        val frame = silenceFrame()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (wakes.isEmpty() && System.currentTimeMillis() < deadline) {
+            detector.accept(frame, frame.size)
+        }
+
+        assertEquals(1, wakes.size)
+        assertEquals("alexa", wakes.single().wakeId)
+        detector.close()
+    }
+
+    @Test fun sharedModelLoadFailureSignalsUnavailable() {
+        val hooks = OpenWakeWordDetector.TestHooks()
+        var melLoads = 0
+        hooks.assetLoader = { path ->
+            when {
+                path.endsWith("melspectrogram.onnx") -> {
+                    melLoads++
+                    File("src/main/assets/$path").readBytes()
+                }
+                path.endsWith("embedding_model.onnx") -> error("simulated emb load failure")
+                else -> File("src/main/assets/$path").readBytes()
+            }
+        }
+        val unavailable = mutableListOf<String>()
+        val ready = mutableListOf<String>()
+        val (factory, h) = OpenWakeWordDetector.testFactory(listOf(jarvisConfig()), hooks)
+        val detector = factory.create(
+            testHost(recordingEvents(ready = ready, unavailable = unavailable)),
+        )
+
+        waitUntil(10_000) { unavailable.isNotEmpty() || h.readyEvents.isNotEmpty() }
+        assertEquals(listOf(OpenWakeWordDetector.ID), unavailable)
+        assertTrue(ready.isEmpty())
+        assertFalse(h.readyEvents.contains(true))
+        assertEquals("mel session must be created before emb fails", 1, melLoads)
+        // Teardown after a partial shared-build failure must not hang or throw.
+        detector.close()
+    }
 }

@@ -15,7 +15,7 @@ object WakeDetectors {
 
     /**
      * openWakeWord neural KWS — reads bundled ONNX assets from `commons-android` (`assets/oww/…`).
-     * Not yet wired into either app; enabling it is a follow-up commit.
+     * Use alongside or instead of [vosk]; apps opt in via [WakeMicConfig.detectors].
      */
     fun oww(): WakeDetector.Factory = OpenWakeWordDetector.factory()
 
