@@ -531,6 +531,16 @@ class OpenWakeWordDetector private constructor(
         const val WAKE_PHRASE = "hey jarvis"
         const val WAKE_ID = "jarvis"
 
+        /**
+         * Default fire threshold (openWakeWord probability in [0, 1]).
+         *
+         * Tuned on Portal gen2 + Mac TTS benches — see
+         * `portal-assistant/tools/wakeword-bench/results/TUNING_LOOP.md`. **0.5** is the robust
+         * default: background FA ≈ 0, and lowering to 0.4 only buys embedded/noisy recall by
+         * roughly doubling adversarial hard-negative FA over air. Consecutive-frame patience
+         * regresses reverb/noisy harder than it helps FA. Further precision needs hard-negative
+         * training or a lead-word gate — not threshold gymnastics.
+         */
         const val DEFAULT_SCORE_THRESHOLD = 0.5f
 
         /**

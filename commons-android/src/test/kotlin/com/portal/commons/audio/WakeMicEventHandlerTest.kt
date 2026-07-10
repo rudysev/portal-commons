@@ -60,8 +60,12 @@ class WakeMicEventHandlerTest {
         val h = handler()
         h.onWake(WakeEvent("oww", "jarvis", "a"))
         nowMs = 500L
-        h.onWake(WakeEvent("oww", "jarvis", "b"))
+        h.onWake(WakeEvent("vosk", "jarvis", "b"))
         assertEquals(1, wakes.size)
+        // Both fires are logged (shadow visibility); only the first is handed off.
+        assertEquals(2, log.size)
+        assertTrue(log[0].contains("(oww)"))
+        assertTrue(log[1].contains("(vosk)"))
     }
 
     @Test fun isCoolingDownTrueUntilWindowElapses() {

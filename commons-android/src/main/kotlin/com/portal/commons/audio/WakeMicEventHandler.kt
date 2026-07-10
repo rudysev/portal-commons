@@ -29,8 +29,10 @@ internal class WakeMicEventHandler(
     }
 
     override fun onWake(event: WakeEvent) {
-        if (!handoffCooldown.tryFire(event.wakeId, clock())) return
+        // Always log — including Vosk shadows that lose the FireCooldown race to oWW — so parallel
+        // detectors remain visible in debug.txt for benchmarking.
         log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
+        if (!handoffCooldown.tryFire(event.wakeId, clock())) return
         wakeConsumer(event)
     }
 

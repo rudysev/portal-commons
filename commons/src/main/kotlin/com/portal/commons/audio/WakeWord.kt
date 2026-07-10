@@ -30,6 +30,7 @@ data class WakeWord(
 
     companion object {
         /** Default openWakeWord classifier threshold when a plugin omits `com.portal.wake.min_confidence`. */
+        /** See [com.portal.commons.audio.OpenWakeWordDetector.DEFAULT_SCORE_THRESHOLD]. */
         const val DEFAULT_SCORE_THRESHOLD = 0.5
 
         private val WHITESPACE = Regex("\\s+")
