@@ -24,8 +24,6 @@ android {
     }
 
     testOptions {
-        // Use the bundled org.json (testImplementation) instead of android.jar's throwing stubs, so the
-        // Vosk-JSON parser (WakeRecognizer.parseResult) can be exercised in plain JVM unit tests.
         unitTests.isReturnDefaultValues = true
     }
 }
@@ -42,7 +40,7 @@ dependencies {
     implementation("com.alphacephei:vosk-android:0.3.75")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303") // real org.json for the WakeRecognizer.parseResult test
+    testImplementation("org.json:json:20240303") // real org.json for WakeRecognizer.parseResult tests
     // JVM ONNX Runtime for integration tests that exercise bundled assets on the dev/CI host.
     testImplementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
 }

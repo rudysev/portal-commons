@@ -9,7 +9,7 @@ interface WakeHandoffCooldown {
     fun isCoolingDown(wakeId: String): Boolean
 
     /**
-     * True while any wake id is inside the engine's post-fire handoff cooldown. [VoskWakeDetector] uses this
+     * True while any wake id is inside the engine's post-fire handoff cooldown. Detectors use this
      * to gate all inference during handoff (matching the pre-seam global cooldown behavior).
      */
     fun isAnyCoolingDown(): Boolean

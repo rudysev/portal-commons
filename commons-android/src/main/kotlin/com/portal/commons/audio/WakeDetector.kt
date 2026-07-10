@@ -20,7 +20,7 @@ import android.content.Context
  */
 interface WakeDetector {
 
-    /** Stable short id for logs, e.g. `"vosk"`. */
+    /** Stable short id for logs, e.g. `"oww"`. */
     val id: String
 
     /**
