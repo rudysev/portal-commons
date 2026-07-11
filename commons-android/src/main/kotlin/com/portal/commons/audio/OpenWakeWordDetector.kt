@@ -323,7 +323,9 @@ class OpenWakeWordDetector private constructor(
         closed = true
         // Capture may still be inside accept() after PcmCaptureSession.stop()'s bounded join times out.
         // Drain in-flight inference before closing OrtSessions (shared mel/embed + classifiers).
-        captureGuard.awaitIdle(CAPTURE_IDLE_DRAIN_MS)
+        if (!captureGuard.awaitIdle(CAPTURE_IDLE_DRAIN_MS)) {
+            events.onDiagnostic(ID, "close: capture still in flight after ${CAPTURE_IDLE_DRAIN_MS}ms — tearing down anyway")
+        }
         modelThread.submitAndJoin(MODEL_THREAD_JOIN_MS) { tearDownOnModelThread() }
         modelThread.shutdown(MODEL_THREAD_JOIN_MS)
         ready = false
