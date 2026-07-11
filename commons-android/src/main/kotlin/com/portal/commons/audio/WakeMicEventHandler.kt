@@ -12,6 +12,8 @@ internal class WakeMicEventHandler(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit,
     private val postToMain: (Runnable) -> Unit = WakeCallbackThreads.mainThreadPoster(),
+    /** When true, scores still flow via detector scoreLogger but [onWake] is never delivered. */
+    private val suppressWake: Boolean = false,
 ) : WakeDetector.Events, WakeHandoffCooldown {
 
     private val handoffCooldown = FireCooldown(handoffCooldownMs)
@@ -29,6 +31,7 @@ internal class WakeMicEventHandler(
     }
 
     override fun onWake(event: WakeEvent) {
+        if (suppressWake) return
         if (!handoffCooldown.tryFire(event.wakeId, clock())) return
         log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
         wakeConsumer(event)

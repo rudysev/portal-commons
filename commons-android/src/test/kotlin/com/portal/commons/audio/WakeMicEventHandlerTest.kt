@@ -102,4 +102,20 @@ class WakeMicEventHandlerTest {
         h.onWake(WakeEvent("oww", "alexa", "b"))
         assertEquals(2, wakes.size)
     }
+
+    @Test fun suppressWakeDropsOnWake() {
+        val h = WakeMicEventHandler(
+            handoffCooldownMs = 1_500L,
+            wakeConsumer = { wakes.add(it) },
+            onDetectorReady = {},
+            onDetectorUnavailable = {},
+            clock = { nowMs },
+            log = { log.add(it) },
+            postToMain = { it.run() },
+            suppressWake = true,
+        )
+        h.onWake(WakeEvent("oww", "jarvis", "score=0.95"))
+        assertTrue(wakes.isEmpty())
+        assertTrue(log.isEmpty())
+    }
 }

@@ -30,6 +30,7 @@ class WakeMicEngine(
         onDetectorUnavailable = config.onDetectorUnavailable,
         log = config.log,
         postToMain = postToMain,
+        suppressWake = config.benchMode,
     )
 
     private val detectorHost = object : WakeDetector.Host {
@@ -39,7 +40,15 @@ class WakeMicEngine(
         override val handoffCooldown: WakeHandoffCooldown = eventHandler
     }
 
-    private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }
+    private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }.also { list ->
+        if (config.benchMode) {
+            for (d in list) {
+                if (d is OpenWakeWordDetector) {
+                    d.scoreLogger = { id, s -> config.log("oww-score $id ${"%.3f".format(s)}") }
+                }
+            }
+        }
+    }
 
     @Volatile private var pendingWakeWords: List<WakeWord>? = null
 

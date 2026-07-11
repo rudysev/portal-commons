@@ -24,6 +24,11 @@ data class WakeMicConfig(
     val onStopped: () -> Unit = {},
     val beforeMicAcquire: () -> Unit = {},
     val log: (String) -> Unit = DebugLog::log,
+    /**
+     * On-device score-logging mode for speaker→mic benchmarks: log every openWakeWord frame score
+     * (`oww-score <id> <s>`) and **do not** fire [onWake] (no conversation handoff). Off in production.
+     */
+    val benchMode: Boolean = false,
 ) {
     companion object {
         /** Suppresses re-fire of the same wake id for this long after a match, covering the handoff window. */

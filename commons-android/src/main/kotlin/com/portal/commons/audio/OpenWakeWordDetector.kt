@@ -103,6 +103,13 @@ class OpenWakeWordDetector private constructor(
     private val featBuf = ArrayDeque<FloatArray>()
     private val lastDiagMs = HashMap<String, Long>()
 
+    /**
+     * Optional per-frame score sink for on-device tuning/benchmarking: invoked with (wake id, score) for
+     * every scored frame. Null in production. Set by [WakeMicEngine] when [WakeMicConfig.benchMode] is on.
+     * Called on the capture thread.
+     */
+    @Volatile var scoreLogger: ((String, Float) -> Unit)? = null
+
     init {
         modelThread.submit { loadInitial() }
     }
@@ -384,6 +391,7 @@ class OpenWakeWordDetector private constructor(
         for (classifier in classifiers) {
             if (classifier.closed) continue
             val score = classify(models, classifier, flat)
+            scoreLogger?.invoke(classifier.wakeId, score)
             classifier.stepsSinceFire =
                 if (classifier.stepsSinceFire == Int.MAX_VALUE) classifier.stepsSinceFire
                 else classifier.stepsSinceFire + 1
