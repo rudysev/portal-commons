@@ -76,10 +76,13 @@ class OpenWakeWordDetector private constructor(
     }
 
     @Volatile private var shared: SharedModels? = null
+
     @Volatile private var loadedClassifiers: List<LoadedClassifierHandle> = emptyList()
 
     @Volatile private var ready = false
+
     @Volatile private var closed = false
+
     /** True once [loadInitial] has finished (ready or unavailable) — gates hot-swap vs stash-only. */
     @Volatile private var initialLoadFinished = false
     private var wasReady = false
@@ -381,8 +384,11 @@ class OpenWakeWordDetector private constructor(
             if (classifier.closed) continue
             val score = classify(models, classifier, flat)
             classifier.stepsSinceFire =
-                if (classifier.stepsSinceFire == Int.MAX_VALUE) classifier.stepsSinceFire
-                else classifier.stepsSinceFire + 1
+                if (classifier.stepsSinceFire == Int.MAX_VALUE) {
+                    classifier.stepsSinceFire
+                } else {
+                    classifier.stepsSinceFire + 1
+                }
             maybeLogNearMiss(classifier.wakeId, score, classifier.scoreThreshold, nowMs)
             if (score >= classifier.scoreThreshold && classifier.stepsSinceFire >= REFRACTORY_STEPS) {
                 classifier.stepsSinceFire = 0
@@ -409,9 +415,9 @@ class OpenWakeWordDetector private constructor(
         OnnxTensor.createTensor(models.env, FloatBuffer.wrap(f), longArrayOf(1, f.size.toLong())).use { t ->
             models.melSess.run(mapOf(models.melInName to t)).use { r ->
                 val out = r[0] as OnnxTensor
-                val T = melTimeSteps(out.info.shape)
+                val timeSteps = melTimeSteps(out.info.shape)
                 val fb = out.floatBuffer
-                return Array(T) { row ->
+                return Array(timeSteps) { row ->
                     FloatArray(NUM_MEL) { c -> fb.get(row * NUM_MEL + c) / 10f + 2f }
                 }
             }
@@ -484,9 +490,8 @@ class OpenWakeWordDetector private constructor(
         historyLen = pushHistorySamples(history, historyLen, src, off, len)
     }
 
-    private fun asset(name: String): ByteArray =
-        testHooks?.assetLoader?.invoke(name)
-            ?: context.assets.open(name).use { it.readBytes() }
+    private fun asset(name: String): ByteArray = testHooks?.assetLoader?.invoke(name)
+        ?: context.assets.open(name).use { it.readBytes() }
 
     /**
      * Static description of one per-phrase ONNX classifier: which wake [wakeId] it fires for, the model
@@ -497,14 +502,12 @@ class OpenWakeWordDetector private constructor(
         val modelBytes: ByteArray,
         val scoreThreshold: Float,
     ) {
-        override fun equals(other: Any?): Boolean =
-            other is PhraseClassifierConfig &&
-                wakeId == other.wakeId &&
-                scoreThreshold == other.scoreThreshold &&
-                modelBytes.contentEquals(other.modelBytes)
+        override fun equals(other: Any?): Boolean = other is PhraseClassifierConfig &&
+            wakeId == other.wakeId &&
+            scoreThreshold == other.scoreThreshold &&
+            modelBytes.contentEquals(other.modelBytes)
 
-        override fun hashCode(): Int =
-            31 * wakeId.hashCode() + scoreThreshold.hashCode() + modelBytes.contentHashCode()
+        override fun hashCode(): Int = 31 * wakeId.hashCode() + scoreThreshold.hashCode() + modelBytes.contentHashCode()
     }
 
     /** Whether phrase models are resolved from bundled assets or supplied explicitly at construction. */
@@ -513,6 +516,7 @@ class OpenWakeWordDetector private constructor(
     /** Injectable hooks for unit tests — never set in production factories. */
     internal class TestHooks {
         var beforePublishReady: (() -> Unit)? = null
+
         /** Invoked on the model thread after shared models load, before phrase configs are resolved. */
         var beforeResolveConfigs: (() -> Unit)? = null
         var classifyOverride: ((wakeId: String) -> Float?)? = null
@@ -549,14 +553,12 @@ class OpenWakeWordDetector private constructor(
         internal const val DIAG_MIN_INTERVAL_MS = 500L
 
         /** Frames to retain during model load: [PRE_READY_BUDGET_MS] converted to [PcmCaptureFormat.FRAME_MS] slots. */
-        fun preReadyMaxFrames(budgetMs: Int = PRE_READY_BUDGET_MS): Int =
-            (budgetMs + PcmCaptureFormat.FRAME_MS - 1) / PcmCaptureFormat.FRAME_MS
+        fun preReadyMaxFrames(budgetMs: Int = PRE_READY_BUDGET_MS): Int = (budgetMs + PcmCaptureFormat.FRAME_MS - 1) / PcmCaptureFormat.FRAME_MS
 
         /**
          * The wake id the bundled hey-jarvis model owns within a discovered set.
          */
-        fun ownedWakeId(words: List<WakeWord>): String? =
-            (words.firstOrNull { it.phrase == WAKE_PHRASE } ?: words.firstOrNull { it.id == WAKE_ID })?.id
+        fun ownedWakeId(words: List<WakeWord>): String? = (words.firstOrNull { it.phrase == WAKE_PHRASE } ?: words.firstOrNull { it.id == WAKE_ID })?.id
 
         internal fun melTimeSteps(shape: LongArray): Int = if (shape.size >= 2) shape[shape.size - 2].toInt() else 0
 
@@ -618,14 +620,13 @@ class OpenWakeWordDetector private constructor(
             }.getOrNull()
         }
 
-        fun buildBundledPhraseConfigs(context: android.content.Context, words: List<WakeWord>): List<PhraseClassifierConfig> =
-            buildList {
-                for (word in words) {
-                    val bytes = loadBuiltinModel(context, word) ?: continue
-                    val threshold = word.scoreThreshold.toFloat().coerceIn(0f, 1f)
-                    add(PhraseClassifierConfig(word.id, bytes, threshold))
-                }
+        fun buildBundledPhraseConfigs(context: android.content.Context, words: List<WakeWord>): List<PhraseClassifierConfig> = buildList {
+            for (word in words) {
+                val bytes = loadBuiltinModel(context, word) ?: continue
+                val threshold = word.scoreThreshold.toFloat().coerceIn(0f, 1f)
+                add(PhraseClassifierConfig(word.id, bytes, threshold))
             }
+        }
 
         fun assetsPresent(context: android.content.Context): Boolean = runCatching {
             val files = context.assets.list(ASSET_DIR)?.toSet() ?: emptySet()
@@ -633,10 +634,9 @@ class OpenWakeWordDetector private constructor(
         }.getOrDefault(false)
 
         /** Factory with explicit phrase configs (portal-wake, including plugin models). */
-        fun factory(phraseConfigs: List<PhraseClassifierConfig>): WakeDetector.Factory =
-            WakeDetector.Factory { host ->
-                OpenWakeWordDetector(host, ModelSource.EXPLICIT, phraseConfigs)
-            }
+        fun factory(phraseConfigs: List<PhraseClassifierConfig>): WakeDetector.Factory = WakeDetector.Factory { host ->
+            OpenWakeWordDetector(host, ModelSource.EXPLICIT, phraseConfigs)
+        }
 
         /** Test-only factory with injectable hooks and explicit phrase configs. */
         internal fun testFactory(
@@ -651,10 +651,9 @@ class OpenWakeWordDetector private constructor(
         }
 
         /** Factory that resolves bundled phrase models from the wake word list (portal-assistant). */
-        fun factory(): WakeDetector.Factory =
-            WakeDetector.Factory { host ->
-                OpenWakeWordDetector(host, ModelSource.BUNDLED, emptyList())
-            }
+        fun factory(): WakeDetector.Factory = WakeDetector.Factory { host ->
+            OpenWakeWordDetector(host, ModelSource.BUNDLED, emptyList())
+        }
 
         internal fun flushBufferedFrames(
             frames: List<ByteArray>,
