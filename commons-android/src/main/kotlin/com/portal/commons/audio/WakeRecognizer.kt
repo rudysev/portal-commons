@@ -24,7 +24,7 @@ class WakeRecognizer(
     initialWakeWords: List<WakeWord>,
     private val onReady: () -> Unit,
     private val onUnavailable: () -> Unit,
-    // Where the Vosk model comes from. null (default) = bundled `assets/[MODEL_ASSET]`, unpacked to filesDir
+    // Where the Vosk model comes from. null (default) = bundled `assets/[VoskModelLoader.MODEL_ASSET]`, unpacked to filesDir
     // (portal-wake). A non-null dir = an already-unpacked model on disk, loaded directly — for a consumer that
     // **downloads** the model at runtime instead of shipping it in the APK (portal-assistant on gen2). If the
     // dir isn't a real model (no `am/`), [onUnavailable] fires, same as a missing asset.
@@ -62,19 +62,11 @@ class WakeRecognizer(
     }
 
     init {
-        // Load the model off the caller's thread; builds + warms the recognizer, then signals. Two sources:
-        // a downloaded dir (loaded directly) or the bundled asset (unpacked to filesDir) — see [modelDir].
-        try {
-            if (modelDir != null) loadFromDir(modelDir) else unpackFromAssets(context)
-        } catch (
-            @Suppress("SwallowedException")
-            t: Throwable,
-        ) {
-            // The throwable is intentionally swallowed: don't let a model-load / native-init failure crash the
-            // service. This class is deliberately log-free (see KDoc); by contract any init failure is surfaced
-            // as the onUnavailable() signal, which the owning engine's consumer logs.
-            onUnavailable()
-        }
+        // Load the model off the caller's thread; builds + warms the recognizer, then signals. Source
+        // selection (bundled asset vs downloaded dir) and the failure contract live in [VoskModelLoader],
+        // shared with [VoskPhraseVerifier] — this class is deliberately log-free (see KDoc), so by contract
+        // any load failure surfaces as the onUnavailable() signal, which the owning engine's consumer logs.
+        VoskModelLoader.load(context, modelDir, onLoaded = ::onModelLoaded, onUnavailable = onUnavailable)
     }
 
     /**
@@ -97,38 +89,6 @@ class WakeRecognizer(
         }
         recognizer = rec
         if (rec != null) onReady() else onUnavailable()
-    }
-
-    /** Bundled-asset source (portal-wake): unpack `assets/[MODEL_ASSET]` into filesDir, then [onModelLoaded]. */
-    private fun unpackFromAssets(context: Context) {
-        org.vosk.android.StorageService.unpack(
-            context,
-            MODEL_ASSET,
-            MODEL_TARGET,
-            { m -> onModelLoaded(m) },
-            { onUnavailable() },
-        )
-    }
-
-    /**
-     * Downloaded-model source (portal-assistant on gen2): the model is already unpacked on disk, so load the
-     * [Model] straight from [dir] on a background thread (the native load is heavy). A missing/partial dir
-     * (no `am/`) is treated as "no model" — [onUnavailable], same as a missing asset.
-     */
-    private fun loadFromDir(dir: File) {
-        // A complete Vosk model has all of [MODEL_DIRS]; a partial dir (e.g. a truncated download) fails fast
-        // here instead of after a slow native Model() load — defense in depth for any caller passing modelDir.
-        if (MODEL_DIRS.any { !File(dir, it).isDirectory }) {
-            onUnavailable()
-            return
-        }
-        Thread {
-            val m = runCatching { Model(dir.absolutePath) }.getOrNull()
-            if (m != null) onModelLoaded(m) else onUnavailable()
-        }.apply {
-            isDaemon = true
-            name = "wake-model-load"
-        }.start()
     }
 
     /**
@@ -260,9 +220,6 @@ class WakeRecognizer(
     }
 
     companion object {
-        const val MODEL_ASSET = "model-en-us" // assets/model-en-us/
-        const val MODEL_TARGET = "vosk-model" // unpacked into filesDir
-        private val MODEL_DIRS = listOf("am", "conf", "graph", "ivector") // every dir a complete Vosk model has
         const val NO_CONF = -1.0 // sentinel: recognizer gave no per-word confidence
         const val WARMUP_SILENCE_FRAMES = 10 // ~1 s of silence to settle the online decoder after a reset
 

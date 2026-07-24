@@ -393,7 +393,7 @@ class OpenWakeWordDetector private constructor(
             if (score >= classifier.scoreThreshold && classifier.stepsSinceFire >= REFRACTORY_STEPS) {
                 classifier.stepsSinceFire = 0
                 events.onWake(
-                    WakeEvent(ID, classifier.wakeId, "score=${"%.3f".format(score)}"),
+                    WakeEvent(ID, classifier.wakeId, "score=${"%.3f".format(score)}", score = score),
                 )
             }
         }

@@ -19,6 +19,7 @@ must touch the Android SDK (the mic `AudioRecord` wrapper). `:commons-android` d
 | `PcmCaptureFormat` | The single source of truth for the capture shape (16 kHz mono 16-bit, `BYTES_PER_SAMPLE`, derived `FRAME_BYTES`) that capture, level math, and the Android seam all key off. |
 | `PcmLevel` | RMS / level math for little-endian 16-bit mono PCM. Powers the recording-level indicator (`normalized`); `rms` exposes the raw amplitude for any other level check. Pure, fully tested. |
 | `WakeMatcher` / `WakeWord` | Pure Vosk wake-decision logic and phrase model (`com.portal.commons.audio`). `WakeWord` also carries an openWakeWord `scoreThreshold`. |
+| `TwoStagePolicy` / `TwoStageTuning` | Pure cascade decision (verify / bypass / single-stage fallback) and the measured thresholds behind it. Drives `TwoStageWakeDetector`. |
 
 All package `com.portal.commons`.
 
@@ -29,7 +30,10 @@ All package `com.portal.commons`.
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
 | `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s. Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
 | `WakeDetector` / `VoskWakeDetector` / `OpenWakeWordDetector` | Recognition seam; Vosk (grammar decode) and openWakeWord (ONNX neural KWS) implementations. Select via [WakeDetectors]. |
-| `WakeRouting` | Pure handoff policy when oWW and Vosk run in parallel — oWW owns its ids; Vosk shadows those and routes the rest. |
+| `TwoStageWakeDetector` | **The cascade** (`WakeDetectors.twoStage()`): openWakeWord proposes at a loose threshold, a phrase-constrained Vosk decode of the same 2 s window disposes. An AND, composed from a detector + a `WakePhraseVerifier` — see below. |
+| `WakePhraseVerifier` / `VoskPhraseVerifier` | Stage 2: "was this phrase actually spoken in this window?" Narrower than a detector on purpose — a verifier can't fire, which is what makes the composition an AND. |
+| `PcmWindowBuffer` | The rolling 2 s sample window the cascade hands to stage 2 (distinct from `PcmRingBuffer`, which replays whole frames captured during model load). |
+| `WakeRouting` | Pure handoff policy when oWW and Vosk run in **parallel** — oWW owns its ids; Vosk shadows those and routes the rest. Superseded by `TwoStageWakeDetector` for new wiring: parallel detectors are an OR, so their false accepts add up. |
 
 ## Build / test (standalone)
 
