@@ -18,14 +18,15 @@ import java.io.File
  * far-field utterances occupy the same score band (0.45–0.48 vs 0.30–0.50), but they are trivially
  * separable *phonetically*.
  *
- * **Deliberately lenient — do not "harden" this into [WakeMatcher].** The check is "did the keyword
- * decode", not [WakeMatcher]'s strict gates (mandatory confident lead, no `[unk]`, ≤3 words). Those gates
- * are what hold the *Vosk-only* detector at zero false accepts, and they cost it 12 of 19 recoverable
- * misses — Vosk hears "jarvis" reliably but loses "hey" at distance or in noise. Behind stage 1 they are no
- * longer load-bearing for precision, because stage 1 has already established that the phrase was spoken.
- * Reusing them here would drag recall back down to the Vosk-only baseline and make the cascade pointless.
- * Measured: lenient stage 2 confirms 88% of positives, and its 9.6/h false-accept rate *in isolation* is
- * exactly what stage 1 exists to suppress. See `hey-jarvis/PHASE_A.md`.
+ * **Lenient, but not unconditionally so — see [containsPhrase].** The check is "did the whole declared
+ * phrase decode, intact", *not* [WakeMatcher]'s strict gates (confidence floors, no `[unk]`, ≤3 words).
+ * Those gates are what hold the *Vosk-primary* detector at zero false accepts, and they cost it 12 of 19
+ * recoverable misses — Vosk hears "jarvis" reliably but loses "hey" at distance or in noise. Behind stage 1
+ * they are no longer load-bearing for precision, because stage 1 has already established that the phrase
+ * was spoken; reusing them here would drag recall back to the Vosk-only baseline and make the cascade
+ * pointless. Measured: this rule confirms ~88% of MIC positives and 100% of VR positives, while its
+ * false-accept rate *in isolation* (9.6/h) is exactly what stage 1 exists to suppress.
+ * See `hey-jarvis/PHASE_A.md` and `PHASE_B.md` §1d.
  *
  * **One recognizer, reused.** Building a [Recognizer] compiles the grammar into a decoding FST — far too
  * slow to do per candidate on the capture thread. One is built when the model loads and reset between
@@ -80,16 +81,15 @@ internal class VoskPhraseVerifier(
         val rec = recognizer ?: return false
         // Verify against this candidate's OWN phrase: stage 1 fires per classifier, so confirming a
         // "jarvis" candidate with a decode of "hey alexa" would be a cross-phrase false accept.
-        val keyword = wakeWords.firstOrNull { it.id == wakeId }?.keyword?.lowercase() ?: return false
+        val phrase = wakeWords.firstOrNull { it.id == wakeId }?.phrase?.lowercase() ?: return false
         if (window.isEmpty()) return false
 
         return runCatching {
             rec.reset() // discard any state from the previous verification — each window is independent
             rec.acceptWaveForm(window, window.size)
             val text = JSONObject(rec.finalResult).optString("text", "").lowercase()
-            // Whole-word match: "jarvis" must be a token, not a substring of some longer decode.
-            val decoded = text.split(' ').any { it == keyword }
-            if (!decoded && text.isNotEmpty()) onDiagnostic("stage-2 decode [$text] carries no '$keyword'")
+            val decoded = containsPhrase(text, phrase)
+            if (!decoded && text.isNotEmpty()) onDiagnostic("stage-2 decode [$text] is not '$phrase'")
             decoded
         }.getOrElse {
             // A native failure must not be read as a confirmation — fail closed, and say so.
@@ -155,4 +155,42 @@ internal class VoskPhraseVerifier(
         // all. A grammar that won't compile means stage 2 stays unavailable and the fallback threshold runs.
         Recognizer(m, PcmCaptureFormat.SAMPLE_RATE.toFloat(), buildGrammar(words))
     }.getOrNull()
+
+    companion object {
+        private val WHITESPACE = Regex("\\s+")
+
+        /**
+         * Did [text] decode the whole [phrase] — every word, in order, adjacent?
+         *
+         * **Whole phrase, not just the keyword.** The keyword-only rule this replaced accepted a bare
+         * "jarvis", which fired on ordinary conversation about Jarvis (measured: 1 false accept in 1.6 h of
+         * VR negatives, decoding `jarvis [unk]`). Requiring the declared lead costs **nothing** on the
+         * VOICE_RECOGNITION capture path portal-wake uses — 100% recall either way over 80 utterances
+         * spanning quiet and running water — because the lead is exactly what stage 2 is good at when the
+         * signal is clean enough to reach it at all.
+         *
+         * **Still deliberately lenient — do not tighten further.** `[unk]` on either side is tolerated, and
+         * so is surrounding speech; only the phrase itself must appear intact. Demanding an *exact*
+         * `"hey jarvis"` decode with no `[unk]` measured 1.7 points worse on MIC positives and removed no
+         * additional false accepts on either negative set. And [WakeMatcher]'s full gate set — confidence
+         * floors, phrase-length limits — is stricter still and belongs to the Vosk-*primary* detector, where
+         * it is the only thing standing between ambient speech and a handoff. Here stage 1 has already
+         * established that the phrase was spoken; re-litigating that costs the recall the cascade exists to
+         * buy (see `hey-jarvis/PHASE_A.md`).
+         *
+         * A single-word phrase (a wake word with no lead, e.g. a bare "computer") reduces to the old
+         * keyword check, which is correct: there is no lead to require.
+         *
+         * Pure + static, so it is unit-tested.
+         */
+        fun containsPhrase(text: String, phrase: String): Boolean {
+            val words = text.trim().split(WHITESPACE).filter { it.isNotEmpty() }
+            val target = phrase.trim().split(WHITESPACE).filter { it.isNotEmpty() }
+            if (target.isEmpty() || words.size < target.size) return false
+            for (start in 0..words.size - target.size) {
+                if ((target.indices).all { words[start + it] == target[it] }) return true
+            }
+            return false
+        }
+    }
 }
