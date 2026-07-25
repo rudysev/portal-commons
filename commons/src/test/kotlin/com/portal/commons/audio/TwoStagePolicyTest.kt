@@ -17,6 +17,8 @@ class TwoStagePolicyTest {
         score: Float,
         state: TwoStagePolicy.VerifierState = TwoStagePolicy.VerifierState.READY,
         verified: Boolean = true,
+        // The shipped default is BYPASS_DISABLED; tests that exercise the bypass opt in explicitly.
+        bypass: Float = TwoStageTuning.BYPASS_SCORE,
     ) = TwoStagePolicy.decide(
         score = score,
         verifierState = state,
@@ -24,7 +26,10 @@ class TwoStagePolicyTest {
             verifyCalls++
             verified
         },
+        bypassScore = bypass,
     )
+
+    private val micBypass = TwoStageTuning.BYPASS_SCORE_MIC
 
     private fun fired(d: TwoStagePolicy.Decision) = d is TwoStagePolicy.Decision.Fire
 
@@ -41,7 +46,7 @@ class TwoStagePolicyTest {
     }
 
     @Test fun blocksEvenJustBelowTheBypass() {
-        val d = decide(score = TwoStageTuning.BYPASS_SCORE - 0.01f, verified = false)
+        val d = decide(score = micBypass - 0.01f, verified = false, bypass = micBypass)
         assertFalse(fired(d))
         assertEquals(1, verifyCalls)
     }
@@ -51,26 +56,31 @@ class TwoStagePolicyTest {
     @Test fun bypassFiresWithoutConsultingStageTwo() {
         // Stage 2 is less noise-robust for the phrase than stage 1 — it rejected genuine utterances scoring
         // 0.94/0.98 under running water. Above the bypass, stage 1 wins and the decode is skipped entirely.
-        assertTrue(fired(decide(score = 0.94f, verified = false)))
+        assertTrue(fired(decide(score = 0.94f, verified = false, bypass = micBypass)))
         assertEquals(0, verifyCalls)
     }
 
     @Test fun bypassIsInclusiveAtItsThreshold() {
-        assertTrue(fired(decide(score = TwoStageTuning.BYPASS_SCORE, verified = false)))
+        assertTrue(fired(decide(score = micBypass, verified = false, bypass = micBypass)))
         assertEquals(0, verifyCalls)
     }
 
     @Test fun bypassAppliesEvenWhileStageTwoIsLoading() {
-        val d = decide(score = 0.94f, state = TwoStagePolicy.VerifierState.LOADING, verified = false)
+        val d = decide(score = 0.94f, state = TwoStagePolicy.VerifierState.LOADING, verified = false, bypass = micBypass)
         assertTrue(fired(d))
         assertTrue(d.reason.contains("bypass"))
     }
 
-    @Test fun bypassSitsAboveEveryRecordedFalseAccept() {
-        // Every false accept ever captured scored <= 0.48; the bypass is only safe while that holds.
-        listOf(0.451f, 0.459f, 0.477f).forEach { fa ->
-            assertFalse("$fa must not reach the bypass", fa >= TwoStageTuning.BYPASS_SCORE)
-        }
+    @Test fun bypassIsDisabledByDefaultBecauseNoThresholdIsSafe() {
+        // The bypass was justified by "every false accept ever recorded scored <= 0.48". That premise was
+        // FALSIFIED on 2026-07-24: openWakeWord scored 0.998 on "just relax, it's too much, I got it" —
+        // ordinary speech from a TV through a wall. There is nothing above 0.998 to raise a bypass to, so
+        // the only sound design is to let stage 2 veto everything. See PHASE_B.md section 1g.
+        val realFalseAccept = 0.998f
+        assertFalse("no score may reach the shipped bypass", realFalseAccept >= TwoStageTuning.BYPASS_SCORE)
+        assertTrue("the old MIC bypass would have fired on it", realFalseAccept >= TwoStageTuning.BYPASS_SCORE_MIC)
+        // With the shipped default, that event is handed to stage 2, which rejected it.
+        assertFalse(fired(decide(score = realFalseAccept, verified = false)))
     }
 
     // ---- degradation: stage 2 loading or absent -------------------------------------------------------
@@ -134,6 +144,7 @@ class TwoStagePolicyTest {
 
     @Test fun bypassSitsAboveFallbackSoTheFallbackPathIsReachable() {
         assertTrue(TwoStageTuning.BYPASS_SCORE > TwoStageTuning.FALLBACK_SCORE)
+        assertTrue(TwoStageTuning.BYPASS_SCORE_MIC > TwoStageTuning.FALLBACK_SCORE)
     }
 
     @Test fun stageOneThresholdIsLooserThanTheFallback() {

@@ -106,6 +106,8 @@ class TwoStageWakeDetectorTest {
         words: List<WakeWord> = listOf(jarvis),
         verifyBudgetMs: Long = TwoStageTuning.VERIFY_BUDGET_MS,
         stage2: WakePhraseVerifier = verifier,
+        // Shipped default is BYPASS_DISABLED; bypass tests opt in explicitly.
+        bypassScore: Float = TwoStageTuning.BYPASS_SCORE,
     ): TwoStageWakeDetector {
         val host = object : WakeDetector.Host {
             override val context: Context = appContext
@@ -120,6 +122,7 @@ class TwoStageWakeDetectorTest {
             host = host,
             stage1Factory = { h -> FakeStage1(h).also { stage1 = it } },
             verifierFactory = { _, _ -> stage2 },
+            bypassScore = bypassScore,
             verifyBudgetMs = verifyBudgetMs,
             clock = { now },
         )
@@ -160,13 +163,24 @@ class TwoStageWakeDetectorTest {
     }
 
     @Test fun bypassSkipsStageTwoEntirely() {
-        val d = build()
+        val d = build(bypassScore = TwoStageTuning.BYPASS_SCORE_MIC)
         verifier.confirms = false
         stage1.fireOnAccept = candidate(0.94f)
         d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
 
         assertEquals(1, events.wakes.size)
         assertTrue("the decode must be short-circuited", verifier.windows.isEmpty())
+    }
+
+    @Test fun byDefaultEvenAMaximalScoreIsVerified() {
+        // The bypass is off by default: openWakeWord has been measured at 0.998 on ordinary speech, so no
+        // score may skip stage 2. See TwoStageTuning.BYPASS_SCORE.
+        val d = build()
+        verifier.confirms = false
+        stage1.fireOnAccept = candidate(0.998f)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+        assertTrue("a 0.998 false accept must still be vetoed", events.wakes.isEmpty())
+        assertEquals(1, verifier.windows.size)
     }
 
     @Test fun fallsBackToSingleStageWhileStageTwoLoads() {
@@ -262,7 +276,7 @@ class TwoStageWakeDetectorTest {
     }
 
     @Test fun firedEventsExplainWhichRuleFired() {
-        val d = build()
+        val d = build(bypassScore = TwoStageTuning.BYPASS_SCORE_MIC)
         stage1.fireOnAccept = candidate(0.94f)
         d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
         assertTrue(events.wakes.single().transcript.contains("bypass"))

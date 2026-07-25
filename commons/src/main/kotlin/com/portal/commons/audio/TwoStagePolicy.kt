@@ -9,10 +9,14 @@ package com.portal.commons.audio
  * called; this decides whether that candidate becomes a wake:
  *
  * ```
- * score >= BYPASS_SCORE          -> FIRE   (no decode: stage 1 is more noise-robust than stage 2)
+ * score >= BYPASS_SCORE          -> FIRE   (DISABLED by default — see TwoStageTuning.BYPASS_SCORE)
  * stage 2 ready                  -> FIRE iff it decodes the phrase
  * stage 2 loading / unavailable  -> FIRE iff score >= FALLBACK_SCORE   (single-stage degradation)
  * ```
+ *
+ * The bypass defaults to off because openWakeWord has been measured scoring **0.998 on ordinary unrelated
+ * speech**, so no bypass threshold is safely above the false-accept band — there is nothing above 0.998 to
+ * raise it to. Stage 2 therefore gets to veto everything.
  *
  * [verify] is a lambda, not a value, so the **decode only runs when it is actually needed** — the bypass
  * and the fallback paths never pay for it. That matters: a decode costs ~100–300 ms on the capture thread

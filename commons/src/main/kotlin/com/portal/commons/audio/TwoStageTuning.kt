@@ -31,19 +31,41 @@ object TwoStageTuning {
     const val DEFAULT_STAGE1_THRESHOLD = 0.30
 
     /**
-     * Auto-accept without running stage 2. Stage 2 is *less* noise-robust for the phrase than stage 1:
-     * under running water it rejected two genuine utterances that openWakeWord scored 0.94 and 0.98. This
-     * recovers them.
-     *
-     * Safe because **every false accept ever recorded scored ≤ 0.48** — the bypass sits far above the
-     * entire observed false-accept band. It also short-circuits the decode, so the most confident wakes
-     * are the *fastest* ones.
-     *
-     * ⚠️ Carried over from MIC measurement and **not yet exercised on VOICE_RECOGNITION**: the VR dataset
-     * contains no session noisy enough to need a rescue, so every bypass setting scored identically there.
-     * See `PHASE_B.md` §1.
+     * Sentinel for [BYPASS_SCORE]: no score in [0, 1] can reach it, so stage 2 is **always** consulted.
      */
-    const val BYPASS_SCORE = 0.85f
+    const val BYPASS_DISABLED = Float.POSITIVE_INFINITY
+
+    /**
+     * The bypass threshold that was shipped until 2026-07-24, kept only for a consumer capturing on
+     * `AudioSource.MIC`, where it demonstrably rescued genuine utterances (see [BYPASS_SCORE]).
+     * **Do not use it on `VOICE_RECOGNITION`.**
+     */
+    const val BYPASS_SCORE_MIC = 0.85f
+
+    /**
+     * Auto-accept without running stage 2 — **disabled**, and the reasoning matters.
+     *
+     * The idea was that a very confident stage 1 outranks stage 2, which is *less* noise-robust for the
+     * phrase: on MIC, under running water, Vosk rejected two genuine utterances that openWakeWord scored
+     * 0.94 and 0.98. A 0.85 bypass recovered them, and it was justified by the observation that **every
+     * false accept ever recorded scored ≤ 0.48** — so the bypass sat far above the entire observed
+     * false-accept band.
+     *
+     * **That premise is false.** In 45 min of TV heard through a wall, openWakeWord scored **0.998** on the
+     * words *"just relax, it's too much, I got it"* — ordinary unrelated speech, at essentially maximum
+     * confidence. Stage 2 rejected it (`hey [unk]`); the bypass would have fired. See `PHASE_B.md` §1g.
+     *
+     * Two consequences:
+     *  1. **No stage-1 threshold is safe.** A bypass cannot be raised out of danger, because there is
+     *     nothing above 0.998 to raise it to. The only sound design is to let stage 2 veto *everything*.
+     *  2. On `VOICE_RECOGNITION` the bypass was barely earning anything anyway: measured over 80
+     *     utterances it rescued exactly **one** (99% → 100% recall) while costing **one false accept** in
+     *     3.7 h. For an always-on device that hands off the microphone on a fire, that is a bad trade —
+     *     a missed wake is repeated in a second, a false handoff interrupts whatever is happening.
+     *
+     * Set to [BYPASS_SCORE_MIC] only if you capture on `AudioSource.MIC` and have re-measured.
+     */
+    const val BYPASS_SCORE = BYPASS_DISABLED
 
     /**
      * Single-stage threshold used **only while stage 2 is unusable** — the Vosk model is still loading
