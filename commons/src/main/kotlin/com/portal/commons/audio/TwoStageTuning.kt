@@ -69,9 +69,22 @@ object TwoStageTuning {
 
     /**
      * Single-stage threshold used **only while stage 2 is unusable** — the Vosk model is still loading
-     * (~2.8 s on the Portal) or absent entirely. Degrading to openWakeWord-only at a *safe* threshold
-     * keeps the detector deaf-proof: 0.50 is the value that rejects all three recorded meeting false
-     * accepts, at a known cost in far-field recall. Never used once stage 2 is ready.
+     * (~2.8 s on the Portal) or absent entirely. Never consulted once stage 2 is ready.
+     *
+     * ⚠️ **This is a damage-limitation value, not a safe one.** It was chosen because 0.50 rejects the
+     * three original meeting false accepts (0.451–0.477). Two *confirmed* false accepts have since been
+     * measured **above** it — **0.775** and **0.998**, both on ordinary conversation (`PHASE_B.md` §1g/§1h)
+     * — so single-stage operation at this threshold measures **2 false accepts in 4.78 h (~0.42/h)**.
+     *
+     * There is no better number available: §1g established that **no** stage-1 threshold separates wakes
+     * from ordinary speech, so any single-stage fallback is a compromise between false accepts and going
+     * deaf. It is retained because the exposure is normally trivial — a ~2.8 s window at startup, during
+     * which the odds of encountering such an event are negligible.
+     *
+     * The **permanent** case is the one to watch: a consumer whose Vosk model is genuinely absent runs at
+     * this rate forever. portal-wake bundles the model in its APK, so that path should be unreachable
+     * there; a consumer that *downloads* the model (portal-assistant on gen2) should treat a persistent
+     * [TwoStagePolicy.VerifierState.UNAVAILABLE] as a fault to surface, not a steady state to live in.
      */
     const val FALLBACK_SCORE = 0.50f
 

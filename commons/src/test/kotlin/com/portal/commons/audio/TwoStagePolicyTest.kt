@@ -96,11 +96,25 @@ class TwoStagePolicyTest {
         assertFalse(fired(decide(score = 0.45f, state = TwoStagePolicy.VerifierState.LOADING)))
     }
 
-    @Test fun fallbackRejectsTheRecordedMeetingFalseAccepts() {
-        // The fallback threshold has to be safe on its own — it is the only gate during the ~2.8 s the Vosk
-        // model takes to load, and permanently when no model is installed.
+    @Test fun fallbackRejectsTheOriginalMeetingFalseAccepts() {
+        // The three false accepts FALLBACK_SCORE was chosen against.
         listOf(0.451f, 0.459f, 0.477f).forEach { fa ->
             assertFalse(fired(decide(score = fa, state = TwoStagePolicy.VerifierState.LOADING)))
+        }
+    }
+
+    @Test fun fallbackIsDamageLimitationNotSafety() {
+        // Two CONFIRMED false accepts on ordinary conversation sit ABOVE the fallback (PHASE_B.md 1g/1h),
+        // so single-stage operation fires on them. Locked in as a test because it bounds what the
+        // degraded mode is worth: it is a brief-exposure compromise, not a safe operating point. There is
+        // no better number — no stage-1 threshold separates wakes from speech.
+        listOf(0.775f, 0.998f).forEach { fa ->
+            assertTrue(
+                "single-stage fallback fires on a confirmed false accept at $fa",
+                fired(decide(score = fa, state = TwoStagePolicy.VerifierState.LOADING, verified = false)),
+            )
+            // ...but with stage 2 up, the same event is correctly blocked.
+            assertFalse(fired(decide(score = fa, verified = false)))
         }
     }
 
