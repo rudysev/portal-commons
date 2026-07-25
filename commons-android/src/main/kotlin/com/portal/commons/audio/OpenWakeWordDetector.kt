@@ -408,6 +408,9 @@ class OpenWakeWordDetector private constructor(
             ID,
             "oww near-miss $wakeId score=${"%.3f".format(score)} threshold=${"%.3f".format(threshold)}",
         )
+        // Also reported structurally: a consumer that saves audit clips needs the score, not the sentence.
+        // Shares the rate limit above, so this can't fire per-step.
+        events.onNearMiss(ID, wakeId, score)
     }
 
     private fun melspec(models: SharedModels): Array<FloatArray> {

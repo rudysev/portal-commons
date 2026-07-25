@@ -46,6 +46,7 @@ class TwoStageWakeDetector internal constructor(
     private val fallbackScore: Float = TwoStageTuning.FALLBACK_SCORE,
     private val verifyBudgetMs: Long = TwoStageTuning.VERIFY_BUDGET_MS,
     private val clock: () -> Long = SystemClock::elapsedRealtime,
+    private val audit: WakeAudit? = null,
 ) : WakeDetector {
 
     override val id: String = ID
@@ -84,6 +85,14 @@ class TwoStageWakeDetector internal constructor(
         override fun onDiagnostic(detectorId: String, message: String) = events.onDiagnostic(ID, "stage-1 ($detectorId): $message")
 
         override fun onWake(event: WakeEvent) = onStage1Candidate(event)
+
+        // A sub-threshold stage-1 score never becomes a candidate, so the policy never sees it and no clip
+        // would otherwise be saved — yet this is exactly where a *missed* wake shows up. Rate-limited by
+        // stage 1, so it cannot flood the recorder.
+        override fun onNearMiss(detectorId: String, wakeId: String, score: Float) {
+            saveClip(WakeAudit.Clip.NEAR, wakeId, score)
+            events.onNearMiss(ID, wakeId, score)
+        }
     }
 
     override fun start() {
@@ -146,12 +155,29 @@ class TwoStageWakeDetector internal constructor(
 
     private fun report(event: WakeEvent, decision: TwoStagePolicy.Decision) {
         when (decision) {
-            is TwoStagePolicy.Decision.Fire ->
+            is TwoStagePolicy.Decision.Fire -> {
+                saveClip(WakeAudit.Clip.WAKE, event.wakeId, event.score)
                 events.onWake(event.copy(detectorId = ID, transcript = decision.reason))
+            }
 
-            is TwoStagePolicy.Decision.Block ->
+            is TwoStagePolicy.Decision.Block -> {
+                saveClip(WakeAudit.Clip.REJECTED, event.wakeId, event.score)
                 events.onDiagnostic(ID, "near-miss [${event.wakeId}] ${decision.reason}")
+            }
         }
+    }
+
+    /**
+     * Hand the window behind a decision to the audit sink, if one is configured. Takes its own snapshot
+     * rather than reusing [timedVerify]'s: the copy costs ~64 KB on a candidate (rare, and the decode next
+     * to it costs 100–300 ms), and it keeps the audit path independent of whether stage 2 ran at all — a
+     * bypass, a fallback and a near-miss all produce a clip without one.
+     *
+     * A stage 1 that reports no score is recorded at 0; the reason on the matching `debug.txt` line says so.
+     */
+    private fun saveClip(clip: WakeAudit.Clip, wakeId: String, score: Float?) {
+        val sink = audit ?: return
+        sink.save(clip, wakeId, score ?: 0f, window.snapshot())
     }
 
     /**
@@ -213,21 +239,28 @@ class TwoStageWakeDetector internal constructor(
          *
          * @param modelDir stage 2's Vosk model: null = bundled `assets/model-en-us` (portal-wake);
          *   a directory = an already-unpacked, downloaded model (portal-assistant on gen2).
+         * @param audit optional [WakeAudit] for saving the audio behind each decision; null = no capture.
          */
-        fun factory(modelDir: File? = null): WakeDetector.Factory = factory(OpenWakeWordDetector.factory(), modelDir)
+        fun factory(modelDir: File? = null, audit: WakeAudit? = null): WakeDetector.Factory = factory(OpenWakeWordDetector.factory(), modelDir, audit)
 
         /** The cascade with explicit per-phrase stage-1 ONNX models (portal-wake plugin models). */
         fun factory(
             phraseConfigs: List<OpenWakeWordDetector.PhraseClassifierConfig>,
             modelDir: File? = null,
-        ): WakeDetector.Factory = factory(OpenWakeWordDetector.factory(stage1PhraseConfigs(phraseConfigs)), modelDir)
+            audit: WakeAudit? = null,
+        ): WakeDetector.Factory = factory(OpenWakeWordDetector.factory(stage1PhraseConfigs(phraseConfigs)), modelDir, audit)
 
         /** The cascade over an arbitrary stage-1 detector — the seam unit tests and benchmarks use. */
-        fun factory(stage1: WakeDetector.Factory, modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
+        fun factory(
+            stage1: WakeDetector.Factory,
+            modelDir: File? = null,
+            audit: WakeAudit? = null,
+        ): WakeDetector.Factory = WakeDetector.Factory { host ->
             TwoStageWakeDetector(
                 host = host,
                 stage1Factory = stage1,
                 verifierFactory = { h, diag -> VoskPhraseVerifier(h.context, h.wakeWords, diag, modelDir) },
+                audit = audit,
             )
         }
     }

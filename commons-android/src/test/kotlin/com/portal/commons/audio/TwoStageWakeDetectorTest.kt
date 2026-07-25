@@ -3,6 +3,7 @@ package com.portal.commons.audio
 import android.app.Application
 import android.content.Context
 import com.portal.commons.PcmCaptureFormat
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -73,11 +74,25 @@ class TwoStageWakeDetectorTest {
         }
     }
 
+    /** Audit sink stand-in: records what would have been written, without touching a disk. */
+    private class FakeAudit : WakeAudit {
+        class Saved(val clip: WakeAudit.Clip, val wakeId: String, val score: Float, val pcm: ShortArray)
+
+        val saved = mutableListOf<Saved>()
+        override fun save(clip: WakeAudit.Clip, wakeId: String, score: Float, pcm: ShortArray) {
+            saved.add(Saved(clip, wakeId, score, pcm))
+        }
+    }
+
     private class Recorder : WakeDetector.Events {
         val ready = mutableListOf<String>()
         val unavailable = mutableListOf<String>()
         val wakes = mutableListOf<WakeEvent>()
         val diagnostics = mutableListOf<String>()
+        val nearMisses = mutableListOf<Triple<String, String, Float>>()
+        override fun onNearMiss(detectorId: String, wakeId: String, score: Float) {
+            nearMisses.add(Triple(detectorId, wakeId, score))
+        }
         override fun onReady(detectorId: String) {
             ready.add(detectorId)
         }
@@ -100,6 +115,7 @@ class TwoStageWakeDetectorTest {
     private lateinit var stage1: FakeStage1
     private val verifier = FakeVerifier()
     private val events = Recorder()
+    private val audit = FakeAudit()
     private var now = 0L
 
     private fun build(
@@ -108,6 +124,8 @@ class TwoStageWakeDetectorTest {
         stage2: WakePhraseVerifier = verifier,
         // Shipped default is BYPASS_DISABLED; bypass tests opt in explicitly.
         bypassScore: Float = TwoStageTuning.BYPASS_SCORE,
+        // Default null: capture is opt-in, and every other test must exercise the no-audit path.
+        audit: WakeAudit? = null,
     ): TwoStageWakeDetector {
         val host = object : WakeDetector.Host {
             override val context: Context = appContext
@@ -125,6 +143,7 @@ class TwoStageWakeDetectorTest {
             bypassScore = bypassScore,
             verifyBudgetMs = verifyBudgetMs,
             clock = { now },
+            audit = audit,
         )
     }
 
@@ -409,5 +428,91 @@ class TwoStageWakeDetectorTest {
         stage1.fireOnAccept = WakeEvent(FakeStage1.ID, "jarvis", "no score", score = null)
         d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
         assertTrue(events.wakes.isEmpty())
+    }
+
+    // ---- audit clips -----------------------------------------------------------------------------------
+    //
+    // A live run without these produces scores nobody can interpret: a debug.txt line cannot distinguish a
+    // false accept from someone genuinely saying the phrase. See WakeAudit.
+
+    @Test fun aFireIsCaptured() {
+        val d = build(audit = audit)
+        verifier.confirms = true
+        stage1.fireOnAccept = candidate(0.45f)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+
+        val saved = audit.saved.single()
+        assertEquals(WakeAudit.Clip.WAKE, saved.clip)
+        assertEquals("jarvis", saved.wakeId)
+        assertEquals(0.45f, saved.score, 1e-6f)
+    }
+
+    @Test fun aStageTwoRejectionIsCaptured() {
+        // The most valuable clip of the three: this is the cascade earning its keep, and the only way to
+        // confirm afterwards that what it threw out was not a real wake.
+        val d = build(audit = audit)
+        verifier.confirms = false
+        stage1.fireOnAccept = candidate(0.46f)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+
+        assertEquals(WakeAudit.Clip.REJECTED, audit.saved.single().clip)
+    }
+
+    @Test fun aStageOneNearMissIsCaptured() {
+        // Below stage 1's threshold, so no candidate is ever raised and the policy never runs — yet this is
+        // where a MISSED wake shows up.
+        val d = build(audit = audit)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+        stage1.host.events.onNearMiss(FakeStage1.ID, "jarvis", 0.28f)
+
+        val saved = audit.saved.single()
+        assertEquals(WakeAudit.Clip.NEAR, saved.clip)
+        assertEquals(0.28f, saved.score, 1e-6f)
+        assertTrue("no candidate may be raised by a near-miss", events.wakes.isEmpty())
+    }
+
+    @Test fun aNearMissIsAlsoReportedUnderTheCascadeId() {
+        build(audit = audit)
+        stage1.host.events.onNearMiss(FakeStage1.ID, "jarvis", 0.28f)
+        assertEquals(Triple(TwoStageWakeDetector.ID, "jarvis", 0.28f), events.nearMisses.single())
+    }
+
+    @Test fun theCapturedClipIsTheAudioTheDecisionWasMadeOn() {
+        // A clip that isn't the window stage 2 decoded would reproduce a different score offline, which is
+        // exactly what score_clips.py exists to check.
+        val d = build(audit = audit)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+        stage1.fireOnAccept = candidate(0.45f)
+        d.accept(frame(2), PcmCaptureFormat.FRAME_BYTES)
+
+        assertArrayEquals(verifier.windows.single(), audit.saved.single().pcm)
+    }
+
+    @Test fun aFallbackFireIsCapturedWithoutStageTwoRunning() {
+        val d = build(audit = audit)
+        verifier.state = TwoStagePolicy.VerifierState.LOADING
+        stage1.fireOnAccept = candidate(0.60f)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+
+        assertTrue("stage 2 must not have run", verifier.windows.isEmpty())
+        assertEquals(WakeAudit.Clip.WAKE, audit.saved.single().clip)
+    }
+
+    @Test fun aScorelessCandidateIsCapturedAtZero() {
+        val d = build(audit = audit)
+        stage1.fireOnAccept = WakeEvent(FakeStage1.ID, "jarvis", "no score", score = null)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+        assertEquals(0f, audit.saved.single().score, 1e-6f)
+    }
+
+    @Test fun nothingIsCapturedWithoutASink() {
+        // Capture is opt-in and must cost nothing when off — the detector ships this way to consumers that
+        // don't configure a recorder.
+        val d = build()
+        stage1.fireOnAccept = candidate(0.45f)
+        d.accept(frame(1), PcmCaptureFormat.FRAME_BYTES)
+        stage1.host.events.onNearMiss(FakeStage1.ID, "jarvis", 0.28f)
+        assertTrue(audit.saved.isEmpty())
+        assertEquals(1, events.wakes.size)
     }
 }

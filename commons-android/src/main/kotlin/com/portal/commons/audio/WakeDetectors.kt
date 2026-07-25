@@ -31,12 +31,15 @@ object WakeDetectors {
      *
      * @param modelDir stage 2's Vosk model: null = bundled `assets/model-en-us` (portal-wake); a directory
      *   = an already-unpacked, downloaded model (portal-assistant on gen2).
+     * @param audit optional sink for the audio behind each decision — pass a [WakeClipRecorder] to make a
+     *   live run interpretable (see [WakeAudit]); null captures nothing.
      */
-    fun twoStage(modelDir: File? = null): WakeDetector.Factory = TwoStageWakeDetector.factory(modelDir)
+    fun twoStage(modelDir: File? = null, audit: WakeAudit? = null): WakeDetector.Factory = TwoStageWakeDetector.factory(modelDir, audit)
 
     /** The cascade with explicit per-phrase stage-1 ONNX models (portal-wake plugin models). */
     fun twoStage(
         phraseConfigs: List<OpenWakeWordDetector.PhraseClassifierConfig>,
         modelDir: File? = null,
-    ): WakeDetector.Factory = TwoStageWakeDetector.factory(phraseConfigs, modelDir)
+        audit: WakeAudit? = null,
+    ): WakeDetector.Factory = TwoStageWakeDetector.factory(phraseConfigs, modelDir, audit)
 }

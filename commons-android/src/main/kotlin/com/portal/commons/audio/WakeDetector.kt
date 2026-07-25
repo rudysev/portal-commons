@@ -78,6 +78,18 @@ interface WakeDetector {
          * detectors are distinguishable in `debug.txt`.
          */
         fun onDiagnostic(detectorId: String, message: String)
+
+        /**
+         * A scored candidate that fell just **below** [WakeWord.scoreThreshold] — so no [onWake] was raised
+         * and nothing downstream ever saw it. Structured rather than folded into [onDiagnostic] because a
+         * consumer has to act on the numbers: [TwoStageWakeDetector] uses this to save a `near` audit clip,
+         * and a wake nobody heard leaves no other trace to explain afterwards.
+         *
+         * Rate-limited by the detector (see `OpenWakeWordDetector.DIAG_MIN_INTERVAL_MS`) — this is *not*
+         * every sub-threshold step. Called on the **capture thread**. Default no-op: a detector need not
+         * report near-misses, and most consumers only want [onDiagnostic]'s log line.
+         */
+        fun onNearMiss(detectorId: String, wakeId: String, score: Float) = Unit
     }
 
     /** Builds a [WakeDetector] once the engine has wired up its [Host]. */
