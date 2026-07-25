@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  *
  * **Off the capture thread, deliberately.** [save] only timestamps the snapshot and hands it to a bounded
  * queue drained by one private daemon thread — the same shape as [DebugLog], and for a stronger reason
- * here. A clip is ~64 KB, and a `rej` clip is written immediately after a 100–300 ms stage-2 decode that is
+ * here. A clip is ~64 KB, and a `rej` clip is written immediately after a ~900 ms stage-2 decode that is
  * already spending the capture thread's [TwoStageTuning.VERIFY_BUDGET_MS] budget. Writing inline would both
  * risk dropping audio and inflate the very decode timings the budget line exists to measure. Under a flood
  * faster than the disk can drain, clips are dropped rather than blocking capture (logged once).

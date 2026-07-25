@@ -97,14 +97,39 @@ object TwoStageTuning {
 
     /**
      * Wall-clock budget for one stage-2 decode. Stage 2 runs **synchronously on the capture thread**
-     * (see `TwoStageWakeDetector`), so this is a real constraint, not a target:
-     * `AudioRecordPcmDevice` sizes its `AudioRecord` buffer at `max(minBuf, FRAME_BYTES * 4)` = **≥400 ms**,
-     * and `PcmCaptureSession` reads non-blocking. A decode that stays inside this budget is absorbed by
-     * that buffer and the loop catches up on the following reads; one that overruns it drops audio.
+     * (see `TwoStageWakeDetector`), so this is a real constraint, not a target: `AudioRecordPcmDevice`
+     * sizes its `AudioRecord` buffer at `max(minBuf, FRAME_BYTES * 16)` = **≥1.6 s**, and
+     * `PcmCaptureSession` reads non-blocking. A decode that stays inside that buffer is absorbed and the
+     * loop catches up on the following reads; one that outruns it drops audio.
      *
-     * Measured cost is ~100–300 ms. Candidates are rare (2 in 46 min of kitchen negatives at stage-1
-     * 0.30), so the amortised cost is negligible — but a single overrun is a real gap in capture, which is
-     * why `TwoStageWakeDetector` times every decode and reports one that exceeds this.
+     * **Measured on the Portal, 2026-07-25 — the earlier "~100–300 ms" claim was wrong by ~3×.**
+     * Over 17 decodes on the real capture thread:
+     *
+     * | min | median | mean | max |
+     * |---|---|---|---|
+     * | 755 ms | 877 ms | 922 ms | 1079 ms |
+     *
+     * Not warm-up: the first was 1053 ms and the distribution stayed flat at ~900 ms all session. All
+     * 17 overran the 400 ms budget this constant used to hold, i.e. the report had stopped carrying
+     * information — it fired on *every* candidate rather than flagging an anomaly.
+     *
+     * 1200 ms sits above the worst decode seen with a little room, so an overrun is once again a genuine
+     * signal worth reading.
+     *
+     * ⚠️ **Raising this number is not, by itself, a fix.** The budget only controls *reporting*; what
+     * protects capture is the buffer in `AudioRecordPcmDevice`. Both were changed together (400 ms → 1.6 s
+     * of buffer, 400 ms → 1200 ms of budget). Raising the budget alone would silence the warning and leave
+     * the dropped audio exactly where it was — do not "fix" a future overrun by tuning this constant on
+     * its own. If decodes get slower, enlarge the buffer first and re-measure.
+     *
+     * Why the dropped audio mattered, precisely — the harm is narrower than "17 of 17" sounds. After a
+     * **confirmed** fire it is harmless: capture pauses for the microphone handoff anyway. After a
+     * **stage-2 rejection** it bites, because capture continues and a fast retry can land in the dropped
+     * window (the one observed water retry took 4.5 s, so it survived; a ~1 s retry might not have).
+     * A sub-threshold near-miss never runs a decode at all.
+     *
+     * Candidates are rare (2 in 46 min of kitchen negatives at stage-1 0.30), so the amortised cost stays
+     * negligible either way. See `../hey-jarvis/HANDOFF_PHASE_E.md` §4a and `HANDOFF_MEASUREMENT.md` §1.
      */
-    const val VERIFY_BUDGET_MS = 400L
+    const val VERIFY_BUDGET_MS = 1_200L
 }

@@ -16,7 +16,7 @@ package com.portal.commons.audio
  * costs nothing on the capture thread.
  *
  * **Threading.** [save] is called on the **capture thread**, inside `accept()`, and must not block: stage 2
- * already spends 100–300 ms there against a [TwoStageTuning.VERIFY_BUDGET_MS] budget, so an implementation
+ * already spends ~900 ms there against a [TwoStageTuning.VERIFY_BUDGET_MS] budget, so an implementation
  * that writes synchronously would both risk dropping audio and corrupt the latency measurement that budget
  * exists to make. [WakeClipRecorder] hands the write to its own thread for exactly that reason.
  */

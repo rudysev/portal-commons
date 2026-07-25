@@ -23,13 +23,27 @@ class AudioRecordPcmDevice : PcmDevice {
     override fun open(): Boolean {
         val minBuf = AudioRecord.getMinBufferSize(PcmCaptureFormat.SAMPLE_RATE, CHANNEL, ENCODING)
         if (minBuf <= 0) return false // ERROR / ERROR_BAD_VALUE: this rate/channel/encoding isn't supported
+
+        // 16 frames = 1.6 s, not the 4 frames (400 ms) shipped until 2026-07-25. The two-stage cascade runs
+        // stage 2 *synchronously on the capture thread*, and that decode measured ~900 ms on the Portal (min
+        // 755, median 877, max 1079 over 17 decodes) — so a 400 ms buffer dropped ~500 ms of audio after
+        // every candidate that reached a decode. 1.6 s gives ~1.5x headroom over the worst decode seen.
+        //
+        // Costs ~51 KB and **no latency**: reads are READ_NON_BLOCKING, so a bigger buffer never makes a
+        // read wait. It only raises the ceiling on how far the consuming loop may fall behind before
+        // AudioRecord overwrites unread samples.
+        //
+        // Sized here rather than per consumer because the constraint belongs to the device — every
+        // PcmDevice consumer inherits it, and portal-assistant shares this class.
+        val bufBytes = maxOf(minBuf, PcmCaptureFormat.FRAME_BYTES * 16)
+
         val r = runCatching {
             AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 PcmCaptureFormat.SAMPLE_RATE,
                 CHANNEL,
                 ENCODING,
-                maxOf(minBuf, PcmCaptureFormat.FRAME_BYTES * 4),
+                bufBytes,
             )
         }.getOrNull() ?: return false
         runCatching { r.startRecording() }

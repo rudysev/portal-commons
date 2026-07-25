@@ -36,7 +36,9 @@ import java.io.File
  *
  * **Threading.** [start]/[accept]/[updateWakeWords] run on the engine's capture thread, and stage 2 runs
  * **synchronously** on it — see [TwoStageTuning.VERIFY_BUDGET_MS] for why that is safe (candidates are
- * rare, and `AudioRecord` is buffered well past one decode) and how an overrun is reported.
+ * rare, and `AudioRecordPcmDevice` buffers 1.6 s, comfortably past one ~900 ms decode) and how an overrun
+ * is reported. That headroom is load-bearing: at the 400 ms buffer shipped until 2026-07-25, every decode
+ * dropped ~500 ms of audio.
  */
 class TwoStageWakeDetector internal constructor(
     private val host: WakeDetector.Host,
