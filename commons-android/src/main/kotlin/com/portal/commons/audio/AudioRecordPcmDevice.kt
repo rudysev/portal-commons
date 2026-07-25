@@ -4,8 +4,10 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import com.portal.commons.DebugLog
 import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.PcmDevice
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The shared Android microphone behind the [PcmDevice] seam: one `AudioRecord` (VOICE_RECOGNITION,
@@ -55,6 +57,7 @@ class AudioRecordPcmDevice : PcmDevice {
             return false
         }
         record = r
+        logBufferOnce(minBuf, bufBytes, r)
         return true
     }
 
@@ -71,7 +74,35 @@ class AudioRecordPcmDevice : PcmDevice {
         record = null
     }
 
+    /**
+     * Report what the capture buffer *actually* is, once per process.
+     *
+     * Exists because not knowing this caused a real misdiagnosis (2026-07-25). The size is
+     * `max(minBuf, FRAME_BYTES * N)`, and it was widely documented as "400 ms" on the assumption that the
+     * `FRAME_BYTES` term wins — which nothing had ever checked. If `getMinBufferSize()` returns the larger
+     * value then the multiplier is inert and tuning it changes nothing, which is exactly the dead end an
+     * A/B of `* 4` vs `* 16` ran into: no measurable difference on device.
+     *
+     * `getBufferSizeInFrames()` is the authority — it reports what `AudioRecord` allocated, which may
+     * exceed what was requested. Logged once because it is a fixed property of the device and format;
+     * `open()` runs on every capture start and rebuild, and per-open lines would drown `debug.txt`.
+     */
+    private fun logBufferOnce(minBuf: Int, requested: Int, r: AudioRecord) {
+        if (!bufferLogged.compareAndSet(false, true)) return
+        val actualFrames = runCatching { r.bufferSizeInFrames }.getOrDefault(-1)
+        val actualBytes = if (actualFrames < 0) -1 else actualFrames * PcmCaptureFormat.CHANNELS * PcmCaptureFormat.BYTES_PER_SAMPLE
+        val actualMs = if (actualFrames < 0) -1 else actualFrames * 1000 / PcmCaptureFormat.SAMPLE_RATE
+        val winner = if (minBuf >= requested) "minBuf wins — the FRAME_BYTES multiplier is INERT" else "FRAME_BYTES multiplier wins"
+        DebugLog.log(
+            "pcm buffer: minBuf=${minBuf}B requested=${requested}B actual=${actualBytes}B (${actualMs}ms, " +
+                "$actualFrames frames) — $winner",
+        )
+    }
+
     private companion object {
+        // One report per process; see logBufferOnce.
+        val bufferLogged = AtomicBoolean(false)
+
         // Mechanical translation of the Android-free PcmCaptureFormat into AudioRecord's AudioFormat
         // constants. This is the *only* place the two representations meet: if the shared format ever moves
         // to stereo or a different sample width, fail loudly here at first use rather than silently
