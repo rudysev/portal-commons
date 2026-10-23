@@ -51,9 +51,9 @@ class WakeMicEngineWedgeTest {
             return length
         }
 
-        override fun stop() {}
+        override fun stop() = Unit
 
-        override fun release() {}
+        override fun release() = Unit
     }
 
     private fun replayWedge(detector: OverlapDetector): List<String> {

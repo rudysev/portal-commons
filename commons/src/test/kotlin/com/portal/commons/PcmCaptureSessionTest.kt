@@ -97,7 +97,7 @@ class PcmCaptureSessionTest {
             return length // a full frame, "arriving" only once unparked
         }
 
-        override fun stop() {}
+        override fun stop() = Unit
 
         override fun release() {
             releaseCount.incrementAndGet()
@@ -229,8 +229,8 @@ class PcmCaptureSessionTest {
                 parked.countDown()
                 return 0
             }
-            override fun stop() {}
-            override fun release() {}
+            override fun stop() = Unit
+            override fun release() = Unit
         }
         val session = PcmCaptureSession(
             device = device,
@@ -338,8 +338,8 @@ class PcmCaptureSessionTest {
                 Thread.sleep(5) // pace the trickle so a full frame can't assemble within idleRebuildMs
                 return 1 // one byte: n>0 (never an error, never a full frame)
             }
-            override fun stop() {}
-            override fun release() {}
+            override fun stop() = Unit
+            override fun release() = Unit
         }
         val session = PcmCaptureSession(
             device = device,
@@ -375,8 +375,8 @@ class PcmCaptureSessionTest {
                 return true
             }
             override fun read(buf: ByteArray, offset: Int, length: Int) = -1 // always error → triggers the rebuild
-            override fun stop() {}
-            override fun release() {}
+            override fun stop() = Unit
+            override fun release() = Unit
         }
         val session = PcmCaptureSession(
             device = device,
@@ -549,7 +549,7 @@ class PcmCaptureSessionTest {
                 return true
             }
             override fun read(buf: ByteArray, offset: Int, length: Int) = 0
-            override fun stop() {}
+            override fun stop() = Unit
             override fun release() {
                 releases.incrementAndGet()
             }

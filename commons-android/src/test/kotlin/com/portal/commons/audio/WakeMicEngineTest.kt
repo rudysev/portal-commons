@@ -41,9 +41,9 @@ class WakeMicEngineTest {
             return length
         }
 
-        override fun stop() {}
+        override fun stop() = Unit
 
-        override fun release() {}
+        override fun release() = Unit
     }
 
     /** Counts frames it is fed and, when [wakeOnNextAccept] is set, fires that wake id from inside [accept]. */
@@ -55,7 +55,7 @@ class WakeMicEngineTest {
 
         @Volatile var clock: () -> Long = { 0L }
 
-        override fun start() {}
+        override fun start() = Unit
 
         override fun accept(buf: ByteArray, n: Int) {
             accepts.add(clock())
@@ -64,9 +64,9 @@ class WakeMicEngineTest {
             host.events.onWake(WakeEvent(id, wakeId, "transcript"))
         }
 
-        override fun updateWakeWords(words: List<WakeWord>) {}
+        override fun updateWakeWords(words: List<WakeWord>) = Unit
 
-        override fun close() {}
+        override fun close() = Unit
     }
 
     @Volatile private var nowMs = 0L
