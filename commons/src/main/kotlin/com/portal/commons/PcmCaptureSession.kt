@@ -90,9 +90,9 @@ class PcmCaptureSession(
      * this force-releases the device as a last resort so the mic slot can't stay held, and keeps the thread
      * reference set so a later [start] refuses rather than running two readers on the one slot. Safe from any
      * thread; a self-[stop] from the capture thread just signals and returns (the loop's own teardown releases
-     * and clears the thread reference).
+     * and clears the thread reference). [timeoutMs] lets a caller with its own deadline join for less.
      */
-    fun stop() {
+    fun stop(timeoutMs: Long = joinTimeoutMs) {
         val t = synchronized(lock) {
             running = false
             thread
@@ -102,7 +102,7 @@ class PcmCaptureSession(
             // loop's finally clears it on the controlled path.
             return
         }
-        runCatching { t.join(joinTimeoutMs) }
+        runCatching { t.join(timeoutMs.coerceAtLeast(1)) }
         if (t.isAlive) {
             // The capture thread didn't exit in time — it overran the join inside a callback, or a native
             // open/stop/release hung. Force-release the device so the mic slot can't stay held, and keep

@@ -28,9 +28,12 @@ class WakeMicEngineTest {
         @Volatile private var frameOut = false
 
         fun push() {
-            frames.release()
+            offer()
             assertTrue("engine never finished the frame", handled.tryAcquire(2, TimeUnit.SECONDS))
         }
+
+        /** Serves one frame without waiting for the engine to finish it (capture may stop inside that frame). */
+        fun offer() = frames.release()
 
         @Volatile var opens = 0
 
@@ -88,7 +91,11 @@ class WakeMicEngineTest {
             val wakeId = wakeOnNextAccept ?: return
             wakeOnNextAccept = null
             host.events.onWake(WakeEvent(id, wakeId, "transcript"))
+            closesWhenTheWakeReturned.add(closes)
         }
+
+        /** [closes] as seen inside [accept] right after the wake it fired returned. */
+        val closesWhenTheWakeReturned = CopyOnWriteArrayList<Int>()
 
         override fun updateWakeWords(words: List<WakeWord>) {
             wakeWordUpdates.add(words)
@@ -117,6 +124,8 @@ class WakeMicEngineTest {
     private val detectors = CopyOnWriteArrayList<FakeDetector>()
     private lateinit var engine: WakeMicEngine
 
+    @Volatile private var closeOnWake = false
+
     private fun newEngine(detectorCount: Int = 1, onCreate: (WakeDetector.Host) -> Unit = {}) = WakeMicEngine(
         ContextWrapper(null),
         WakeMicConfig(
@@ -132,6 +141,7 @@ class WakeMicEngineTest {
             },
             wakeHandoffCooldownMs = 1_500L,
             onWake = {
+                if (closeOnWake) engine.close()
                 wakes.add(it)
                 wakeThreads.add(Thread.currentThread().name)
             },
@@ -412,5 +422,17 @@ class WakeMicEngineTest {
         events.onWake(WakeEvent("fake", "jarvis", "after close"))
 
         assertEquals(emptyList<WakeEvent>(), wakes)
+    }
+
+    @Test fun closeFromInsideTheWakeCallbackClosesTheDetectorOnlyOnceTheFrameEnds() {
+        closeOnWake = true
+        newEngine().start()
+        detector.wakeOnNextAccept = "jarvis"
+        device.offer()
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (detector.closes == 0 && System.nanoTime() < deadline) Thread.sleep(5)
+        assertEquals("closed in the middle of accept", listOf(0), detector.closesWhenTheWakeReturned)
+        assertEquals(1, detector.closes)
     }
 }
