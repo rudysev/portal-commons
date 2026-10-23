@@ -24,7 +24,7 @@ android {
     }
 
     testOptions {
-        // Use the bundled org.json (testImplementation) instead of android.jar's throwing stubs, so the
+        // Use the bundled org.json (testRuntimeOnly) instead of android.jar's throwing stubs, so the
         // Vosk detector's JSON parsing can be exercised in plain JVM unit tests.
         unitTests.isReturnDefaultValues = true
     }
@@ -43,5 +43,7 @@ dependencies {
     // On-device wake-word recognition (VoskWakeDetector/WakeMicEngine) — free, keyless, offline, no GMS.
     implementation("com.alphacephei:vosk-android:0.3.75")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303") // real org.json for the VoskWakeDetector tests
+    // Real org.json for the VoskWakeDetector tests: main code calls it, the tests never reference it, so it is
+    // only needed on the test runtime classpath (in place of android.jar's throwing stubs).
+    testRuntimeOnly("org.json:json:20240303")
 }
