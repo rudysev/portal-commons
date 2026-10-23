@@ -266,7 +266,7 @@ class PcmCaptureSessionTest {
             device = fake,
             onFrame = { _, _ -> frames.incrementAndGet() },
             onStopped = { stopped.countDown() },
-            joinTimeoutMs = 50,
+            stopTimeoutMs = 50,
             pollMs = 0,
         )
 
@@ -289,7 +289,7 @@ class PcmCaptureSessionTest {
             device = fake,
             onFrame = { _, _ -> },
             log = { logs.add(it) },
-            joinTimeoutMs = 50,
+            stopTimeoutMs = 50,
             pollMs = 0,
         )
 
@@ -441,7 +441,7 @@ class PcmCaptureSessionTest {
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> },
-            joinTimeoutMs = 50,
+            stopTimeoutMs = 50,
             pollMs = 0,
         )
 
