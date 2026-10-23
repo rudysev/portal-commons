@@ -7,6 +7,11 @@
 re-runs CI in `portal-wake` and `portal-assistant`, because both build against `portal-commons@main`. This needs the
 `APP_DISPATCH_TOKEN` secret: a fine-grained PAT with Actions and Contents write on the two app repos.
 
+A separate `build-health` job runs `./gradlew buildHealth` (the `com.autonomousapps.dependency-analysis` plugin)
+and fails on any dependency advice: unused, used-but-undeclared or wrongly-configured dependencies. It is not part
+of `check` or the hooks, because the advice changes rarely and the analysis is slow. Run `./gradlew buildHealth`
+yourself after changing dependencies; the report is at `build/reports/dependency-analysis/build-health-report.txt`.
+
 ## Agent skills
 
 ### Issue tracker

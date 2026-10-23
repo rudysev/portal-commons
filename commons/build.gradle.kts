@@ -2,6 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm")
+    id("com.autonomousapps.dependency-analysis") // `buildHealth` advice; version pinned in the root build
 }
 
 // Coordinates used by consuming apps via Gradle composite build (`includeBuild`) dependency

@@ -7,6 +7,19 @@ on:
   repository_dispatch:
 
 jobs:
+  # Dependency advice (unused, undeclared-but-used and wrongly-configured dependencies). Kept out of `check` and the
+  # hooks because the advice changes rarely and the analysis is slow, so this separate job is the alarm.
+  build-health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew buildHealth
+
   build:
     runs-on: ubuntu-latest
     steps:

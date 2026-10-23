@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     // AGP 9 has built-in Kotlin support (the apps likewise apply no standalone kotlin-android plugin).
     id("com.android.library")
+    id("com.autonomousapps.dependency-analysis") // `buildHealth` advice; version pinned in the root build
 }
 
 // Shared Android-coupled helpers for the Portal apps (the bits that can't live in the pure-JVM :commons).
