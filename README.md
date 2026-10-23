@@ -28,17 +28,15 @@ All package `com.portal.commons`.
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
 | `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (one window after any wake: no detector is fed frames and every further wake, whatever its wake id, is dropped; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). `start()` / `pause()` / `close()`: see below. |
-| `CaptureLoss` | Why capture is not running while it is wanted: `NotGranted` (mic could not be opened, including a wedged previous capture) or `Dropped` (capture was running and died, including a failed rebuild), each with a `reason` for the log. Delivered through `WakeMicConfig.onCaptureLost`. |
+| `CaptureLoss` | A **capture loss** (see `GLOSSARY.md`): `NotGranted` or `Dropped`, each with a `reason` for the log. Delivered through `WakeMicConfig.onCaptureLost`. |
 | `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). Detectors never see the handoff cooldown: the engine just withholds frames. Never two calls at once, and never closed mid-call. |
 | `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
 
 ### Wake mic engine lifecycle
 
-- **Capture loss.** Capture is wanted from `start()` until the next `pause()` or `close()`. While it is, the first way
-  capture fails to run arrives once as `onCaptureLost(CaptureLoss)`, at most once per `start()`. A pause you asked for,
-  a stale or discarded capture session, and a loss a newer `start()` has overtaken report nothing. After a loss the
-  engine is idle, as after `pause()`, and never retries on its own: retry by calling `start()`. `start()` returns
-  nothing; a refused start is a `NotGranted` loss.
+- **Capture loss** (defined in `GLOSSARY.md`) arrives as `onCaptureLost(CaptureLoss)`. A stale or discarded capture
+  session and a loss a newer `start()` has overtaken report nothing. After a loss the engine is idle, as after
+  `pause()`, and never retries on its own: retry by calling `start()`. `start()` returns nothing.
 - **Posting rule.** `onCaptureLost`, `onDetectorReady` and `onDetectorUnavailable` are always posted to the main
   looper, never run inline, even from the main thread or the engine's constructor. `onWake` stays synchronous on the
   capture thread, so the consumer can pause within about one frame.
