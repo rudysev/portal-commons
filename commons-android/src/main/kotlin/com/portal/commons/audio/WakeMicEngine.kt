@@ -119,10 +119,7 @@ class WakeMicEngine internal constructor(
         built = PcmCaptureSession(
             device = newDevice(),
             onFrame = { buf, n -> onFrame(built, buf, n) },
-            onStarted = {
-                if (session === built) losses.runStarted()
-                onStarted(built)
-            },
+            onStarted = { onStarted(built) },
             onError = { if (session === built) losses.runError(it) },
             onStopped = { if (session === built) losses.runStopped() },
             log = config.log,
@@ -196,6 +193,7 @@ class WakeMicEngine internal constructor(
     // the detectors.
     private fun onStarted(from: PcmCaptureSession) = detectors.use { all ->
         if (from !== session) return@use
+        losses.runStarted()
         handoffCooldownUntilMs = Long.MIN_VALUE
         all.forEach { it.start() }
     }
