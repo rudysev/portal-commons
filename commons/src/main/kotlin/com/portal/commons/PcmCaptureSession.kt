@@ -25,7 +25,9 @@ package com.portal.commons
  * stay a simple single-lifecycle mechanism; the wedged thread, once it unblocks, sees `running == false`
  * and exits delivering no further frame (it is never revived — the fresh capture is a new instance). Its
  * `finally` still fires [onStopped], so a caller that reuses callbacks across a discard+rebuild should drop
- * that stale stop (e.g. by gating on the current session).
+ * that stale stop (e.g. by gating on the current session). And if the thread overran the join *inside* a
+ * callback, it is still running that callback when [stop] returns — a caller that shares a consumer across the
+ * rebuild must serialize it, or the fresh thread runs alongside the wedged one.
  *
  * **Rebuild.** With [rebuildAfterReadFailures] set, the session rebuilds the device (`stop` → `release` →
  * `open`) after that many consecutive read errors (`< 0`). With [idleRebuildMs] set, it *also* rebuilds when no
@@ -135,9 +137,11 @@ class PcmCaptureSession(
         var off = 0 // bytes assembled into the current frame so far
         var lastFrameNs = System.nanoTime() // monotonic time a full frame was last delivered — drives the idle watchdog
         log("pcm capture started")
-        onStarted()
         var readFails = 0
         try {
+            // A stop() that landed while open() was in flight must not start the consumer either: on gen2 a stopped
+            // session's onStarted ran Vosk's reset + warm-up past the stop join, alongside the rebuilt session.
+            if (running) onStarted()
             while (running) {
                 // Non-blocking read directly into the frame buffer at the current offset.
                 val n = device.read(buf, off, PcmCaptureFormat.FRAME_BYTES - off)

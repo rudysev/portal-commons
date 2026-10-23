@@ -533,6 +533,48 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
+    fun stopDuringOpenNeverFiresOnStarted() {
+        // A stop() that lands while open() is in flight must not start the consumer: onStarted is a callback like
+        // any other. On gen2 a pause mid-open let the stopping thread run Vosk's reset + warm-up past the stop
+        // join, and the rebuilt session then ran the same recognizer on a second thread — a native abort.
+        val inOpen = CountDownLatch(1)
+        val proceedOpen = CountDownLatch(1)
+        val stopped = CountDownLatch(1)
+        val started = AtomicInteger()
+        val releases = AtomicInteger()
+        val device = object : PcmDevice {
+            override fun open(): Boolean {
+                inOpen.countDown()
+                proceedOpen.await()
+                return true
+            }
+            override fun read(buf: ByteArray, offset: Int, length: Int) = 0
+            override fun stop() {}
+            override fun release() {
+                releases.incrementAndGet()
+            }
+        }
+        val session = PcmCaptureSession(
+            device = device,
+            onFrame = { _, _ -> },
+            onStarted = { started.incrementAndGet() },
+            onStopped = { stopped.countDown() },
+            pollMs = 0,
+        )
+
+        session.start()
+        await(inOpen)
+        val stopper = Thread { session.stop() }.apply { start() }
+        Thread.sleep(50) // stop() has cleared `running` and is in its bounded join
+        proceedOpen.countDown() // open() succeeds after the stop
+        stopper.join(5_000)
+        await(stopped)
+
+        assertEquals("onStarted must not fire for a session stopped mid-open", 0, started.get())
+        assertTrue("the opened device is still released", releases.get() >= 1)
+    }
+
+    @Test(timeout = 10_000)
     fun selfStopKeepsZombieGuardUntilLoopExits() {
         // onFrame (on the capture thread) self-stops, then blocks so the loop is still "alive" mid-unwind.
         val fake = FakeDevice().apply { framesToServe = 1 }

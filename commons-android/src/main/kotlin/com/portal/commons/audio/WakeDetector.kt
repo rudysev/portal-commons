@@ -15,6 +15,8 @@ import android.content.Context
  * **capture thread**, at frame boundaries — so an implementation may keep capture-thread-only mutable state
  * without locks, and must never be closed mid-[accept] (the engine defers a wake-set swap to a frame
  * boundary for exactly this reason). [close] is called from the controlling thread after capture has stopped.
+ * The engine never runs two of these calls at once, even when it rebuilds a wedged capture session while the
+ * old capture thread is still inside a detector call (two threads in one Vosk recognizer abort the process).
  * Readiness is asynchronous: a detector signals [Events.onReady] / [Events.onUnavailable] from the
  * model-load thread; [WakeMicEngine] forwards those to the consumer on the main thread (see [WakeMicConfig]).
  */
