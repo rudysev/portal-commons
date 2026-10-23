@@ -69,7 +69,7 @@ object WakeMatcher {
     fun acceptedLeads(w: WakeWord): Set<String>? = w.lead?.let { LEAD_ALIASES[it] ?: setOf(it) }
 
     /**
-     * Vosk's "unknown" escape token — the single source of truth for it: [WakeRecognizer.buildGrammar] adds
+     * Vosk's "unknown" escape token — the single source of truth for it: the Vosk detector's grammar adds
      * this exact string to the grammar and this gate rejects it, so the two can't drift. Its presence in a
      * final decode means non-wake audio was captured in the same window — contamination a **strict** route
      * rejects, since a genuine close-mic wake never decodes one.

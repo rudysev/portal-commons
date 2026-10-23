@@ -442,7 +442,7 @@ class VoskWakeDetectorTest {
         assertEquals(1, model.closeCount)
     }
 
-    private fun warmUp() = List(WakeRecognizer.WARMUP_SILENCE_FRAMES) { "silence" }
+    private fun warmUp() = List(VoskWakeDetector.WARMUP_SILENCE_FRAMES) { "silence" }
 
     private companion object {
         const val TAG_PRIME = 99

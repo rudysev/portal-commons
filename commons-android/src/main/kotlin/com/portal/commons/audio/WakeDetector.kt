@@ -17,8 +17,11 @@ import android.content.Context
  * boundary for exactly this reason). [close] is called from the controlling thread after capture has stopped.
  * The engine never runs two of these calls at once, even when it rebuilds a wedged capture session while the
  * old capture thread is still inside a detector call (two threads in one Vosk recognizer abort the process).
- * Readiness is asynchronous: a detector signals [Events.onReady] / [Events.onUnavailable] from the
- * model-load thread; [WakeMicEngine] forwards those to the consumer on the main thread (see [WakeMicConfig]).
+ * Readiness is asynchronous and may be frame-driven: the Vosk detector signals [Events.onReady] (and
+ * [Events.onUnavailable] for a failed first decoder build) on the capture thread at the first frame after its
+ * model loads — so not while capture is paused — and [Events.onUnavailable] for a failed model load straight
+ * from its model-load thread. [WakeMicEngine] forwards both to the consumer on the main thread (see
+ * [WakeMicConfig]).
  */
 interface WakeDetector {
 
@@ -59,14 +62,21 @@ interface WakeDetector {
     /**
      * How a detector reports back to [WakeMicEngine]. Callbacks carry the detector [WakeEvent.detectorId]; the
      * engine prefixes log lines with it. [onWake] is invoked on the **capture thread**; [onReady] and
-     * [onUnavailable] on the **model-load thread** — [WakeMicEngine] re-delivers those two to the consumer on
-     * the main thread (see [WakeMicConfig]).
+     * [onUnavailable] on the capture thread or a detector's own model-load thread — [WakeMicEngine]
+     * re-delivers those two to the consumer on the main thread (see [WakeMicConfig]).
      */
     interface Events {
-        /** The detector's model finished loading and it can accept audio. Called on the model-load thread. */
+        /**
+         * The detector can accept audio. May be frame-driven: Vosk calls it on the **capture thread** at the
+         * first frame after its model loads, once the first decoder is built and warmed.
+         */
         fun onReady(detectorId: String)
 
-        /** The detector's model is missing/unusable — it will never fire. Called on the model-load thread. */
+        /**
+         * The detector's model is missing/unusable — it will never fire. Vosk calls it on its **model-load
+         * thread** when the load fails, or on the **capture thread** (frame-driven) when the first decoder
+         * build fails.
+         */
         fun onUnavailable(detectorId: String)
 
         /**
