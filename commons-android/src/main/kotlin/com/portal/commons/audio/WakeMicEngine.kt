@@ -77,10 +77,6 @@ class WakeMicEngine internal constructor(
         }
 
         override fun onWake(event: WakeEvent) {
-            if (closed.get()) {
-                config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
-                return
-            }
             val nowMs = clock()
             if (inHandoffCooldown(nowMs)) {
                 config.log("wake dropped (handoff cooldown) → ${event.wakeId} [${event.transcript}]")
@@ -88,11 +84,16 @@ class WakeMicEngine internal constructor(
             }
             handoffCooldownUntilMs = nowMs + config.wakeHandoffCooldownMs
             config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
-            config.onWake(event)
+            wakeGate.deliver(
+                onWake = { config.onWake(event) },
+                onDropped = { config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]") },
+            )
         }
 
         override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
     }
+
+    private val wakeGate = WakeGate()
 
     private val detectorHost = object : WakeDetector.Host {
         override val context: Context = context
@@ -174,18 +175,20 @@ class WakeMicEngine internal constructor(
     /**
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
      *
-     * Bounded: the session's stop join and the wait for a detector call to finish share one [CLOSE_DEADLINE_MS], and
-     * the mic slot is free when it returns. Detectors still busy then, or busy in the calling thread (a close from
-     * inside the wake callback), are closed by the capture thread as it leaves them, never in the middle of a call; a
-     * close that runs out of time logs a `🔴` line. If that call never returns, the detectors' native resources leak
-     * until the process dies.
+     * Bounded: the session's stop join, the wait for a detector call to finish and the wait for a wake already
+     * being delivered share one [CLOSE_DEADLINE_MS], and the mic slot is free when it returns. No wake delivery
+     * begins after it returns, even from a capture thread it gave up waiting for. Detectors still busy then, or busy
+     * in the calling thread (a close from inside the wake callback), are closed by the capture thread as it leaves
+     * them, never in the middle of a call; a close that runs out of time logs a `🔴` line. If that call never
+     * returns, the detectors' native resources leak until the process dies.
      */
     fun close() {
         if (!closed.compareAndSet(false, true)) return
-        val startNs = System.nanoTime()
+        val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_DEADLINE_MS)
+        val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
         session.stop(timeoutMs = CLOSE_DEADLINE_MS)
-        val spentMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
-        detectors.close(timeoutMs = CLOSE_DEADLINE_MS - spentMs, log = config.log)
+        detectors.close(timeoutMs = leftMs(), log = config.log)
+        wakeGate.close(timeoutMs = leftMs())
     }
 
     // A discarded (wedged) session's thread may still call back once it unblocks; only the current one reaches
