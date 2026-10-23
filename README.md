@@ -36,8 +36,17 @@ All package `com.portal.commons`.
 Requires JDK 21.
 
 ```bash
-./gradlew test
+./gradlew check   # unit tests + ktlint (kotlinter); ./gradlew formatKotlin fixes style
 ```
+
+Enable the git hooks once per clone (needs the ktlint CLI: `brew install ktlint`):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`pre-commit` runs ktlint on the staged Kotlin files and `pre-push` runs `./gradlew check`. `--no-verify` skips
+them deliberately.
 
 ## How apps consume it
 

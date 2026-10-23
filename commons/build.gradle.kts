@@ -2,6 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
   kotlin("jvm")
+  id("org.jmailen.kotlinter")
 }
 
 // Coordinates used by consuming apps via Gradle composite build (`includeBuild`) dependency

@@ -16,7 +16,7 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew test assembleDebug
+      - run: ./gradlew check assembleDebug
 
   # Both apps build against portal-commons@main (includeBuild("../portal-commons")), so a green commons run
   # re-runs their CI. APP_DISPATCH_TOKEN: fine-grained PAT, Actions + Contents write on portal-wake and
@@ -26,6 +26,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         app: [portal-wake, portal-assistant]
     steps:
