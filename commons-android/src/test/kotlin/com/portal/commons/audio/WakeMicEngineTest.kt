@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
@@ -16,7 +17,10 @@ import java.util.concurrent.TimeUnit
  */
 class WakeMicEngineTest {
 
-    /** A mic that serves one full frame per [push], which returns once the engine has finished handling it. */
+    /**
+     * A mic that serves one full frame per [push], which returns once the engine has finished handling it. Its next
+     * [failOpens] opens fail, and while [failReads] is set every read is a device error.
+     */
     private class SteppedDevice : PcmDevice {
         private val frames = Semaphore(0)
         private val handled = Semaphore(0)
@@ -30,9 +34,15 @@ class WakeMicEngineTest {
 
         @Volatile var opens = 0
 
+        @Volatile var failOpens = 0
+
+        @Volatile var failReads = false
+
         override fun open(): Boolean {
             opens++
-            return true
+            if (failOpens == 0) return true
+            failOpens--
+            return false
         }
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
@@ -41,9 +51,16 @@ class WakeMicEngineTest {
                 frameOut = false
                 handled.release()
             }
-            if (!frames.tryAcquire(5, TimeUnit.MILLISECONDS)) return 0
-            frameOut = true
-            return length
+            return when {
+                failReads -> -1
+
+                !frames.tryAcquire(5, TimeUnit.MILLISECONDS) -> 0
+
+                else -> {
+                    frameOut = true
+                    length
+                }
+            }
         }
 
         override fun stop() = Unit
@@ -89,8 +106,12 @@ class WakeMicEngineTest {
     private val wakes = CopyOnWriteArrayList<WakeEvent>()
     private val wakeThreads = CopyOnWriteArrayList<String>()
     private val logs = CopyOnWriteArrayList<String>()
+
+    // Runs on the logging thread before the line is recorded, so a test can hold the capture thread at a log line.
+    @Volatile private var beforeLog: (String) -> Unit = {}
     private val ready = CopyOnWriteArrayList<String>()
     private val unavailable = CopyOnWriteArrayList<String>()
+    private val losses = CopyOnWriteArrayList<CaptureLoss>()
     private val posted = CopyOnWriteArrayList<Runnable>()
     private val micAcquires = CopyOnWriteArrayList<Unit>()
     private val detectors = CopyOnWriteArrayList<FakeDetector>()
@@ -116,8 +137,12 @@ class WakeMicEngineTest {
             },
             onDetectorReady = { ready.add(it) },
             onDetectorUnavailable = { unavailable.add(it) },
+            onCaptureLost = { losses.add(it) },
             beforeMicAcquire = { micAcquires.add(Unit) },
-            log = { logs.add(it) },
+            log = {
+                beforeLog(it)
+                logs.add(it)
+            },
         ),
         newDevice = { device },
         postToMain = { posted.add(it) },
@@ -129,6 +154,20 @@ class WakeMicEngineTest {
 
     private fun runPosted() {
         while (posted.isNotEmpty()) posted.removeAt(0).run()
+    }
+
+    private fun await(what: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!condition()) {
+            assertTrue("never happened: $what", System.nanoTime() < deadline)
+            Thread.sleep(5)
+        }
+    }
+
+    /** Waits for the capture thread to log [line], then drains the main-thread queue. */
+    private fun awaitLogThenRunPosted(line: String) {
+        await("logged $line") { line in logs }
+        runPosted()
     }
 
     @After fun tearDown() {
@@ -308,6 +347,64 @@ class WakeMicEngineTest {
         engine.close()
 
         assertEquals(1, detector.closes)
+    }
+
+    @Test fun aRequestedPauseDeliversNoCaptureLoss() {
+        newEngine().start()
+        device.push()
+        engine.pause()
+        runPosted()
+
+        assertEquals(emptyList<CaptureLoss>(), losses)
+    }
+
+    @Test fun aMicThatWontOpenDeliversExactlyOneNotGranted() {
+        newEngine()
+        device.failOpens = 1
+        engine.start()
+        awaitLogThenRunPosted("pcm open failed")
+        Thread.sleep(50) // room for a second, wrong, report to arrive
+        runPosted()
+
+        assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
+    }
+
+    @Test fun aFailedRebuildDuringCaptureDeliversExactlyOneDropped() {
+        newEngine().start()
+        device.push()
+        device.failOpens = 1
+        device.failReads = true // the read-failure run ends in a rebuild whose open fails
+        awaitLogThenRunPosted("pcm capture stopped")
+
+        assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses)
+    }
+
+    @Test fun aLossThatANewerStartOvertookIsDroppedWhenTheQueueDrains() {
+        newEngine()
+        device.failOpens = 1
+        engine.start()
+        await("the loss is posted") { posted.isNotEmpty() }
+        engine.start()
+        device.push() // the newer start is capturing
+        runPosted()
+
+        assertEquals(emptyList<CaptureLoss>(), losses)
+    }
+
+    @Test fun aLateStopFromAnEarlierPauseLandingAfterARestartDeliversNothing() {
+        val holdStop = CountDownLatch(1)
+        beforeLog = { if (it == "pcm capture stopped") holdStop.await() }
+        newEngine().start()
+        device.push()
+        engine.pause() // the capture thread is held after it gave up the session, so the stop join times out
+        engine.start()
+        device.push() // the restart is capturing
+        holdStop.countDown() // the earlier run's stop now lands
+        awaitLogThenRunPosted("pcm capture stopped")
+        Thread.sleep(50) // room for the late stop to be posted
+        runPosted()
+
+        assertEquals(emptyList<CaptureLoss>(), losses)
     }
 
     @Test fun aWakeRaisedAfterCloseNeverReachesTheConsumer() {
