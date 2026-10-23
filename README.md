@@ -27,9 +27,27 @@ All package `com.portal.commons`.
 | Class | Purpose |
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
-| `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (one window after any wake: no detector is fed frames and every further wake, whatever its wake id, is dropped; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
-| `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). Detectors never see the handoff cooldown: the engine just withholds frames. |
+| `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (one window after any wake: no detector is fed frames and every further wake, whatever its wake id, is dropped; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). `start()` / `pause()` / `close()`: see below. |
+| `CaptureLoss` | Why capture is not running while it is wanted: `NotGranted` (mic could not be opened, including a wedged previous capture) or `Dropped` (capture was running and died, including a failed rebuild), each with a `reason` for the log. Delivered through `WakeMicConfig.onCaptureLost`. |
+| `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). Detectors never see the handoff cooldown: the engine just withholds frames. Never two calls at once, and never closed mid-call. |
 | `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
+
+### Wake mic engine lifecycle
+
+- **Capture loss.** Capture is wanted from `start()` until the next `pause()` or `close()`. While it is, the first way
+  capture fails to run arrives once as `onCaptureLost(CaptureLoss)`, at most once per `start()`. A pause you asked for,
+  a stale or discarded capture session, and a loss a newer `start()` has overtaken report nothing. After a loss the
+  engine is idle, as after `pause()`, and never retries on its own: retry by calling `start()`. `start()` returns
+  nothing; a refused start is a `NotGranted` loss.
+- **Posting rule.** `onCaptureLost`, `onDetectorReady` and `onDetectorUnavailable` are always posted to the main
+  looper, never run inline, even from the main thread or the engine's constructor. `onWake` stays synchronous on the
+  capture thread, so the consumer can pause within about one frame.
+- **Closed state.** `close()` is terminal and idempotent. After it nothing is delivered, including callbacks already
+  posted, and `start()` / `pause()` are logged no-ops.
+- **Bounded close.** `close()` is synchronous and safe from any thread, including the wake callback; the mic slot is
+  free when it returns. The capture stop and the wait for a running detector call share one ~400 ms deadline
+  (`CLOSE_DEADLINE_MS`). Detectors still busy then are closed by the capture thread as it leaves them, with a `🔴`
+  log line; if that call never returns, their native resources leak until the process dies.
 
 ## Build / test (standalone)
 
