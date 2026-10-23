@@ -1,7 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    kotlin("jvm")
+  kotlin("jvm")
 }
 
 // Coordinates used by consuming apps via Gradle composite build (`includeBuild`) dependency
@@ -13,23 +13,23 @@ version = "0.1.0"
 // Target Java 11 bytecode so the artifact is consumable by the Portal apps (AGP compileOptions 11),
 // regardless of the JDK that runs the build. No toolchain download required.
 java {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+  sourceCompatibility = JavaVersion.VERSION_11
+  targetCompatibility = JavaVersion.VERSION_11
 }
 
 kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_11)
-        // Keep the build warning-free: any compiler warning fails compilation.
-        allWarningsAsErrors.set(true)
-    }
+  compilerOptions {
+    jvmTarget.set(JvmTarget.JVM_11)
+    // Keep the build warning-free: any compiler warning fails compilation.
+    allWarningsAsErrors.set(true)
+  }
 }
 
 dependencies {
-    testImplementation("junit:junit:4.13.2")
+  testImplementation("junit:junit:4.13.2")
 }
 
 tasks.test {
-    useJUnit()
-    testLogging { events("passed", "skipped", "failed") }
+  useJUnit()
+  testLogging { events("passed", "skipped", "failed") }
 }
