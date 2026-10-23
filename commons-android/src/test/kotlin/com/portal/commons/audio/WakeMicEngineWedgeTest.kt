@@ -3,8 +3,11 @@ package com.portal.commons.audio
 import android.content.ContextWrapper
 import com.portal.commons.PcmDevice
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -27,6 +30,8 @@ class WakeMicEngineWedgeTest {
         private val starts = AtomicInteger()
         private val accepts = AtomicInteger()
         val overlaps = CopyOnWriteArrayList<String>()
+        val closes = CountDownLatch(1)
+        val firstAcceptEntered = CountDownLatch(1)
 
         private inline fun enter(what: String, work: () -> Unit) {
             if (inside.incrementAndGet() > 1) overlaps.add(what)
@@ -40,12 +45,15 @@ class WakeMicEngineWedgeTest {
         override fun start() = enter("start") { if (starts.getAndIncrement() == 0) Thread.sleep(firstStartMs) }
 
         override fun accept(buf: ByteArray, n: Int) = enter("accept") {
-            if (accepts.getAndIncrement() == 0) Thread.sleep(firstAcceptMs)
+            if (accepts.getAndIncrement() == 0) {
+                firstAcceptEntered.countDown()
+                Thread.sleep(firstAcceptMs)
+            }
         }
 
         override fun updateWakeWords(words: List<WakeWord>) = enter("updateWakeWords") {}
 
-        override fun close() = enter("close") {}
+        override fun close() = enter("close") { closes.countDown() }
     }
 
     /** A mic that opens at once and serves a full frame on every read. */
@@ -62,19 +70,22 @@ class WakeMicEngineWedgeTest {
         override fun release() = Unit
     }
 
+    private val logs = CopyOnWriteArrayList<String>()
+
+    private fun newEngine(detector: OverlapDetector) = WakeMicEngine(
+        ContextWrapper(null),
+        WakeMicConfig(
+            wakeWords = emptyList(),
+            detectors = listOf(WakeDetector.Factory { detector }),
+            onWake = {},
+            log = { logs.add(it) },
+        ),
+        newDevice = ::Device,
+        postToMain = { it.run() },
+    )
+
     private fun replayWedge(detector: OverlapDetector): List<String> {
-        val logs = CopyOnWriteArrayList<String>()
-        val engine = WakeMicEngine(
-            ContextWrapper(null),
-            WakeMicConfig(
-                wakeWords = emptyList(),
-                detectors = listOf(WakeDetector.Factory { detector }),
-                onWake = {},
-                log = { logs.add(it) },
-            ),
-            newDevice = ::Device,
-            postToMain = { it.run() },
-        )
+        val engine = newEngine(detector)
         engine.start()
         Thread.sleep(50) // the capture thread is inside its slow detector call
         engine.pause() // the join times out: that thread is still in the detector
@@ -101,6 +112,24 @@ class WakeMicEngineWedgeTest {
     fun wedgedInAcceptRebuiltSessionNeverRunsTheDetectorAlongside() {
         val detector = OverlapDetector(firstAcceptMs = 600) // a slow decode, longer than the 400 ms join
         assertEquals(wedged, replayWedge(detector))
+        assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
+    }
+
+    @Test(timeout = 10_000)
+    fun closeReturnsWithinTheDeadlineWhileADetectorIsStuckAndClosesItOnceItReturns() {
+        val detector = OverlapDetector(firstAcceptMs = 1_500) // a decode stuck far past close()'s deadline
+        val engine = newEngine(detector)
+        engine.start()
+        assertTrue(detector.firstAcceptEntered.await(2, TimeUnit.SECONDS))
+
+        val startNs = System.nanoTime()
+        engine.close()
+        val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
+
+        assertTrue("close() took $tookMs ms", tookMs < 700)
+        assertEquals("closed while still inside accept", 1L, detector.closes.count)
+        assertTrue(logs.any { it.startsWith("🔴") && it.contains("close deferred") })
+        assertTrue("never closed once accept returned", detector.closes.await(3, TimeUnit.SECONDS))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }
 }

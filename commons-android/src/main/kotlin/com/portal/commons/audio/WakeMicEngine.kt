@@ -43,7 +43,7 @@ class WakeMicEngine internal constructor(
         this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
 
     // The handoff cooldown is open while clock() is before this instant. Touched on the capture thread only: under
-    // detectorLock in onStarted/onFrame, and in onWake, which detectors raise from inside accept.
+    // the detector lock in onStarted/onFrame, and in onWake, which detectors raise from inside accept.
     private var handoffCooldownUntilMs = Long.MIN_VALUE
 
     private fun inHandoffCooldown(nowMs: Long = clock()): Boolean = nowMs < handoffCooldownUntilMs
@@ -89,11 +89,7 @@ class WakeMicEngine internal constructor(
         override val events: WakeDetector.Events = detectorEvents
     }
 
-    private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }
-
-    // Serializes every detector call. A capture thread that overran pause()'s stop join can still be inside a
-    // detector when start() rebuilds the session, and a Vosk recognizer run from two threads aborts the process.
-    private val detectorLock = Any()
+    private val detectors = SerializedDetectors(config.detectors.map { it.create(detectorHost) })
 
     // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
     // the read and the clear is never lost.
@@ -151,38 +147,49 @@ class WakeMicEngine internal constructor(
     private fun ignoredAfterClose(call: String): Boolean =
         closed.get().also { if (it) config.log("$call after close() ignored") }
 
-    /** Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered. */
+    /**
+     * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
+     *
+     * Bounded: the session's stop join and the wait for a detector call to finish share one [CLOSE_DEADLINE_MS], and
+     * the mic slot is free when it returns. Detectors still busy then, or busy in the calling thread (a close from
+     * inside the wake callback), are closed by the capture thread as it leaves them, never in the middle of a call.
+     */
     fun close() {
         if (!closed.compareAndSet(false, true)) return
-        session.stop()
-        synchronized(detectorLock) { detectors.forEach { it.close() } }
+        val startNs = System.nanoTime()
+        session.stop(timeoutMs = CLOSE_DEADLINE_MS)
+        val spentMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
+        detectors.close(timeoutMs = CLOSE_DEADLINE_MS - spentMs, log = config.log)
     }
 
     // A discarded (wedged) session's thread may still call back once it unblocks; only the current one reaches
     // the detectors.
-    private fun onStarted(from: PcmCaptureSession): Unit = synchronized(detectorLock) {
-        if (from !== session) return
+    private fun onStarted(from: PcmCaptureSession) = detectors.use { all ->
+        if (from !== session) return@use
         handoffCooldownUntilMs = Long.MIN_VALUE
-        detectors.forEach { it.start() }
+        all.forEach { it.start() }
     }
 
-    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int): Unit = synchronized(detectorLock) {
-        if (from !== session) return
-        applyPendingWakeWords()
+    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int) = detectors.use { all ->
+        if (from !== session) return@use
+        applyPendingWakeWords(all)
         // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
-        for (detector in detectors) {
-            if (inHandoffCooldown()) return
+        for (detector in all) {
+            if (inHandoffCooldown()) return@use
             detector.accept(buf, n)
         }
     }
 
-    private fun applyPendingWakeWords() {
+    private fun applyPendingWakeWords(all: List<WakeDetector>) {
         val words = pendingWakeWords.getAndSet(null) ?: return
         config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
-        detectors.forEach { it.updateWakeWords(words) }
+        all.forEach { it.updateWakeWords(words) }
     }
 
     companion object {
         const val MIC_READ_FAILURES_BEFORE_REBUILD = 40
+
+        /** The whole of [close]'s wait, matching the capture session's stop join. */
+        const val CLOSE_DEADLINE_MS = PcmCaptureSession.DEFAULT_JOIN_TIMEOUT_MS
     }
 }
