@@ -90,12 +90,13 @@ class WakeMicEngineTest {
     private val detectors = CopyOnWriteArrayList<FakeDetector>()
     private lateinit var engine: WakeMicEngine
 
-    private fun newEngine(detectorCount: Int = 1) = WakeMicEngine(
+    private fun newEngine(detectorCount: Int = 1, onCreate: (WakeDetector.Host) -> Unit = {}) = WakeMicEngine(
         ContextWrapper(null),
         WakeMicConfig(
             wakeWords = emptyList(),
             detectors = List(detectorCount) {
                 WakeDetector.Factory { host ->
+                    onCreate(host)
                     FakeDetector(host).also {
                         it.clock = { nowMs }
                         detectors.add(it)
@@ -234,6 +235,22 @@ class WakeMicEngineTest {
 
         assertEquals(listOf("fake"), unavailable)
         assertEquals(listOf("wake unavailable (fake) — detector idle"), logs)
+    }
+
+    @Test fun aModelThatFailsWhileTheEngineIsBeingConstructedIsPostedNotDeliveredInline() {
+        newEngine(onCreate = { it.events.onUnavailable("fake") })
+        assertEquals(emptyList<String>(), unavailable)
+        runPosted()
+
+        assertEquals(listOf("fake"), unavailable)
+    }
+
+    @Test fun aDetectorReadyWhileTheEngineIsBeingConstructedIsPostedNotDeliveredInline() {
+        newEngine(onCreate = { it.events.onReady("fake") })
+        assertEquals(emptyList<String>(), ready)
+        runPosted()
+
+        assertEquals(listOf("fake"), ready)
     }
 
     @Test fun diagnosticsAreLoggedWithTheDetectorId() {
