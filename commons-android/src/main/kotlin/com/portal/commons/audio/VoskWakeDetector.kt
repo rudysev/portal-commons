@@ -248,7 +248,7 @@ internal class VoskWakeDetector(
 
         private const val NO_CONF = -1.0 // sentinel: the decoder gave no per-word confidence
 
-        private val PRE_READY_MAX_FRAMES = (8_000 / PcmCaptureFormat.FRAME_MS).toInt()
+        private val PRE_READY_MAX_FRAMES = 8_000 / PcmCaptureFormat.FRAME_MS
 
         fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
             VoskWakeDetector(

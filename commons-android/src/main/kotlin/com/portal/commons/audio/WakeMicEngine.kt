@@ -111,13 +111,13 @@ class WakeMicEngine internal constructor(
 
     // A discarded (wedged) session's thread may still call back once it unblocks; only the current one reaches
     // the detectors.
-    private fun onStarted(from: PcmCaptureSession) = synchronized(detectorLock) {
+    private fun onStarted(from: PcmCaptureSession): Unit = synchronized(detectorLock) {
         if (from !== session) return
         fireCooldown.reset()
         detectors.forEach { it.start() }
     }
 
-    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int) = synchronized(detectorLock) {
+    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int): Unit = synchronized(detectorLock) {
         if (from !== session) return
         applyPendingWakeWords()
         // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
