@@ -14,8 +14,10 @@ are disabled, because they query the network and fail whenever upstream ships a 
 `*/build/reports/lint-results*.html`.
 
 Hooks: `git config core.hooksPath .githooks` once per clone. `pre-commit` runs the `ktlint` CLI on staged
-`.kt`/`.kts` files (rejects, never auto-fixes); `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate
-escape hatch.
+`.kt`/`.kts` files and `shellcheck` on staged shell scripts (`*.sh`, `*.command`, `.githooks/*`); it rejects on
+findings and never auto-fixes. `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate escape hatch.
+`.githooks/pre-commit` and `.shellcheckrc` are identical copies in portal-commons, portal-wake and portal-assistant
+(portal-apps has the same `.shellcheckrc`); change all of them together.
 
 ## CI
 
@@ -23,6 +25,9 @@ escape hatch.
 `workflow_dispatch`). When it passes on `main`, it sends a `repository_dispatch` (`portal-commons-green`) that
 re-runs CI in `portal-wake` and `portal-assistant`, because both build against `portal-commons@main`. This needs the
 `APP_DISPATCH_TOKEN` secret: a fine-grained PAT with Actions and Contents write on the two app repos.
+
+A `shellcheck` job lints every tracked shell script with the runner's preinstalled shellcheck. shellcheck isn't
+part of `./gradlew check`: the hook and this job cover it.
 
 A separate `build-health` job runs `./gradlew buildHealth` (the `com.autonomousapps.dependency-analysis` plugin)
 and fails on any dependency advice: unused, used-but-undeclared or wrongly-configured dependencies. It is not part
