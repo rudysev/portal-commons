@@ -43,9 +43,10 @@ All package `com.portal.commons`.
 - **Closed state.** `close()` is terminal and idempotent. After it nothing is delivered, including callbacks already
   posted, and `start()` / `pause()` are logged no-ops.
 - **Bounded close.** `close()` is synchronous and safe from any thread, including the wake callback; the mic slot is
-  free when it returns. The capture stop and the wait for a running detector call share one ~400 ms deadline
-  (`CLOSE_DEADLINE_MS`). Detectors still busy then are closed by the capture thread as it leaves them, with a `🔴`
-  log line; if that call never returns, their native resources leak until the process dies.
+  free when it returns. The capture stop, the wait for a running detector call and the wait for a wake being
+  delivered share one ~400 ms deadline (`PcmCaptureSession.STOP_DEADLINE_MS`). Detectors still busy then are closed
+  by the capture thread as it leaves them, with a `🔴` log line; if that call never returns, their native resources
+  leak until the process dies.
 
 ## Build / test (standalone)
 

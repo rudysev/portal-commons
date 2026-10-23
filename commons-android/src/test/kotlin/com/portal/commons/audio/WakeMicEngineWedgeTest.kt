@@ -1,6 +1,7 @@
 package com.portal.commons.audio
 
 import android.content.ContextWrapper
+import com.portal.commons.PcmCaptureSession
 import com.portal.commons.PcmDevice
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -98,7 +99,7 @@ class WakeMicEngineWedgeTest {
         Thread.sleep(50) // the capture thread is inside its slow detector call
         engine.pause() // the join times out: that thread is still in the detector
         engine.start() // refused → rebuilt session → a new capture thread
-        Thread.sleep(700) // let both threads run past the slow call
+        Thread.sleep(PAST_THE_JOIN_MS + 100) // let both threads run past the slow call
         engine.close()
         return logs.filter { it.startsWith("pcm start refused") || it.startsWith("wake capture wedged") }
     }
@@ -110,22 +111,21 @@ class WakeMicEngineWedgeTest {
 
     @Test(timeout = 10_000)
     fun wedgedInStartRebuiltSessionNeverRunsTheDetectorAlongside() {
-        // Vosk's reset + silence warm-up, longer than the 400 ms join
-        val detector = OverlapDetector(firstStartMs = 600)
+        val detector = OverlapDetector(firstStartMs = PAST_THE_JOIN_MS) // Vosk's reset + silence warm-up
         assertEquals(wedged, replayWedge(detector))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }
 
     @Test(timeout = 10_000)
     fun wedgedInAcceptRebuiltSessionNeverRunsTheDetectorAlongside() {
-        val detector = OverlapDetector(firstAcceptMs = 600) // a slow decode, longer than the 400 ms join
+        val detector = OverlapDetector(firstAcceptMs = PAST_THE_JOIN_MS) // a slow decode
         assertEquals(wedged, replayWedge(detector))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }
 
     @Test(timeout = 10_000)
     fun aStartAfterAWedgedPauseCapturesOnAFreshSessionAndDeliversNoCaptureLoss() {
-        val detector = OverlapDetector(firstAcceptMs = 600) // a slow decode, longer than the 400 ms join
+        val detector = OverlapDetector(firstAcceptMs = PAST_THE_JOIN_MS) // a slow decode
         val engine = newEngine(detector)
         engine.start()
         assertTrue(detector.firstAcceptEntered.await(2, TimeUnit.SECONDS))
@@ -145,7 +145,7 @@ class WakeMicEngineWedgeTest {
 
     @Test(timeout = 10_000)
     fun closeReturnsWithinTheDeadlineWhileADetectorIsStuckAndClosesItOnceItReturns() {
-        val detector = OverlapDetector(firstAcceptMs = 1_500) // a decode stuck far past close()'s deadline
+        val detector = OverlapDetector(firstAcceptMs = FAR_PAST_THE_DEADLINE_MS) // a decode stuck past close()
         val engine = newEngine(detector)
         engine.start()
         assertTrue(detector.firstAcceptEntered.await(2, TimeUnit.SECONDS))
@@ -154,10 +154,16 @@ class WakeMicEngineWedgeTest {
         engine.close()
         val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
 
-        assertTrue("close() took $tookMs ms", tookMs < 700)
+        assertTrue("close() took $tookMs ms", tookMs < PAST_THE_JOIN_MS + 100)
         assertEquals("closed while still inside accept", 1L, detector.closes.count)
         assertTrue(logs.any { it.startsWith("🔴") && it.contains("close deferred") })
         assertTrue("never closed once accept returned", detector.closes.await(3, TimeUnit.SECONDS))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
+    }
+
+    private companion object {
+        // Longer than the capture session's stop join, so the capture thread outlives it.
+        const val PAST_THE_JOIN_MS = PcmCaptureSession.STOP_DEADLINE_MS + 200
+        const val FAR_PAST_THE_DEADLINE_MS = PcmCaptureSession.STOP_DEADLINE_MS * 4
     }
 }

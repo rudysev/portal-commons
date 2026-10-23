@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
  * should not call [stop] expecting to join itself (a self-[stop] just signals and returns).
  *
  * **Stop contract.** [PcmDevice.read] is non-blocking, so the loop observes `running == false` within one
- * poll interval and exits on its own; [stop] sets the flag and joins with a bounded [joinTimeoutMs]. On the
+ * poll interval and exits on its own; [stop] sets the flag and joins within a bounded [stopTimeoutMs]. On the
  * normal path the loop's `finally` releases the device, so the device is touched only on the capture thread.
  * If the thread doesn't exit in time (it overran the join inside a callback, or a native call hung), [stop]
  * force-releases the device as a last resort (on a helper thread, so [stop] stays bounded) so the mic slot can't
@@ -52,7 +52,7 @@ class PcmCaptureSession(
     private val log: (message: String) -> Unit = {},
     private val threadName: String = "pcm-capture",
     private val rebuildAfterReadFailures: Int? = null,
-    private val joinTimeoutMs: Long = DEFAULT_JOIN_TIMEOUT_MS,
+    private val stopTimeoutMs: Long = STOP_DEADLINE_MS,
     private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
     private val pollMs: Long = DEFAULT_READ_POLL_MS,
     private val idleRebuildMs: Long? = null,
@@ -98,7 +98,7 @@ class PcmCaptureSession(
      * when that release returns, on the helper thread. A bounded stop is worth more than a held caller: on the main
      * thread an unbounded one is an ANR.
      */
-    fun stop(timeoutMs: Long = joinTimeoutMs) {
+    fun stop(timeoutMs: Long = stopTimeoutMs) {
         val t = synchronized(lock) {
             running = false
             thread
@@ -278,7 +278,11 @@ class PcmCaptureSession(
     }
 
     companion object {
-        const val DEFAULT_JOIN_TIMEOUT_MS = 400L
+        /**
+         * The one bound on stopping capture: [stop]'s whole wait (join plus force-release) by default, and the
+         * shared deadline of `WakeMicEngine.close()`.
+         */
+        const val STOP_DEADLINE_MS = 400L
         const val DEFAULT_READ_ERROR_BACKOFF_MS = 20L
 
         /** The part of [stop]'s timeout left for a force-release once the join gives up (at most half of it). */
