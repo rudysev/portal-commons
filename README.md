@@ -36,17 +36,20 @@ All package `com.portal.commons`.
 Requires JDK 21.
 
 ```bash
-./gradlew check   # unit tests + ktlint (kotlinter); ./gradlew formatKotlin fixes style
+./gradlew check   # unit tests + Android Lint + detekt + ktlint (kotlinter); ./gradlew formatKotlin fixes style
 ```
 
-Enable the git hooks once per clone (needs the ktlint and shellcheck CLIs: `brew install ktlint shellcheck`):
+Enable the git hooks once per clone. They need the ktlint and shellcheck CLIs (`brew install ktlint shellcheck`) and
+the detekt 2.0.0-alpha.6 CLI, `detekt-cli`: Homebrew only has detekt 1.x, so unzip
+[the release zip](https://github.com/detekt/detekt/releases/download/v2.0.0-alpha.6/detekt-cli-2.0.0-alpha.6.zip)
+and put its `bin/` on your `PATH`.
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-`pre-commit` runs ktlint on the staged Kotlin files and shellcheck on the staged shell scripts, and `pre-push`
-runs `./gradlew check`. `--no-verify` skips
+`pre-commit` runs ktlint and detekt on the staged Kotlin files and shellcheck on the staged shell scripts, and
+`pre-push` runs `./gradlew check`. `--no-verify` skips
 them deliberately.
 
 ## How apps consume it
