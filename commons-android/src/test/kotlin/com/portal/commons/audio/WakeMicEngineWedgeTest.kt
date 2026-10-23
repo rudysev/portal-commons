@@ -40,11 +40,7 @@ class WakeMicEngineWedgeTest {
         override fun start() = enter("start") { if (starts.getAndIncrement() == 0) Thread.sleep(firstStartMs) }
 
         override fun accept(buf: ByteArray, n: Int) = enter("accept") {
-            if (accepts.getAndIncrement() ==
-                0
-            ) {
-                Thread.sleep(firstAcceptMs)
-            }
+            if (accepts.getAndIncrement() == 0) Thread.sleep(firstAcceptMs)
         }
 
         override fun updateWakeWords(words: List<WakeWord>) = enter("updateWakeWords") {}
