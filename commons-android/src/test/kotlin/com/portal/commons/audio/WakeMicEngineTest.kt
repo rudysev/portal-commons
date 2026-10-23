@@ -28,7 +28,12 @@ class WakeMicEngineTest {
             assertTrue("engine never finished the frame", handled.tryAcquire(2, TimeUnit.SECONDS))
         }
 
-        override fun open() = true
+        @Volatile var opens = 0
+
+        override fun open(): Boolean {
+            opens++
+            return true
+        }
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
             // The capture loop reads again only once onFrame has returned: that is when the last frame is handled.
@@ -66,7 +71,11 @@ class WakeMicEngineTest {
 
         override fun updateWakeWords(words: List<WakeWord>) = Unit
 
-        override fun close() = Unit
+        @Volatile var closes = 0
+
+        override fun close() {
+            closes++
+        }
     }
 
     @Volatile private var nowMs = 0L
@@ -77,6 +86,7 @@ class WakeMicEngineTest {
     private val ready = CopyOnWriteArrayList<String>()
     private val unavailable = CopyOnWriteArrayList<String>()
     private val posted = CopyOnWriteArrayList<Runnable>()
+    private val micAcquires = CopyOnWriteArrayList<Unit>()
     private val detectors = CopyOnWriteArrayList<FakeDetector>()
     private lateinit var engine: WakeMicEngine
 
@@ -99,6 +109,7 @@ class WakeMicEngineTest {
             },
             onDetectorReady = { ready.add(it) },
             onDetectorUnavailable = { unavailable.add(it) },
+            beforeMicAcquire = { micAcquires.add(Unit) },
             log = { logs.add(it) },
         ),
         newDevice = { device },
@@ -230,5 +241,47 @@ class WakeMicEngineTest {
         events.onDiagnostic("fake", "near-miss [hey(72) jarvis(95)] rejected: floor")
 
         assertEquals(listOf("(fake) near-miss [hey(72) jarvis(95)] rejected: floor"), logs)
+    }
+
+    @Test fun callbacksAlreadyQueuedAreNotDeliveredAfterClose() {
+        newEngine()
+        events.onReady("fake")
+        events.onUnavailable("fake")
+        engine.close()
+        runPosted()
+
+        assertEquals(emptyList<String>(), ready)
+        assertEquals(emptyList<String>(), unavailable)
+    }
+
+    @Test fun startAfterCloseIsALoggedNoOp() {
+        newEngine().close()
+        engine.start()
+
+        assertEquals(emptyList<Unit>(), micAcquires)
+        assertEquals(0, device.opens)
+        assertTrue(logs.contains("start() after close() ignored"))
+    }
+
+    @Test fun pauseAfterCloseIsALoggedNoOp() {
+        newEngine().close()
+        engine.pause()
+
+        assertTrue(logs.contains("pause() after close() ignored"))
+        assertTrue(logs.none { it.startsWith("mic paused") })
+    }
+
+    @Test fun closingTwiceClosesTheDetectorsOnce() {
+        newEngine().close()
+        engine.close()
+
+        assertEquals(1, detector.closes)
+    }
+
+    @Test fun aWakeRaisedAfterCloseNeverReachesTheConsumer() {
+        newEngine().close()
+        events.onWake(WakeEvent("fake", "jarvis", "after close"))
+
+        assertEquals(emptyList<WakeEvent>(), wakes)
     }
 }

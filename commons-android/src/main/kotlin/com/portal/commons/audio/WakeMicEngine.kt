@@ -4,6 +4,7 @@ import android.content.Context
 import com.portal.commons.PcmCaptureSession
 import com.portal.commons.PcmDevice
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
@@ -41,18 +42,28 @@ class WakeMicEngine internal constructor(
 
     private fun inHandoffCooldown(nowMs: Long = clock()): Boolean = nowMs < handoffCooldownUntilMs
 
+    // Terminal: set once by close(). Checked when a posted callback runs, not when it is posted, so a callback
+    // already queued when close() runs never reaches the consumer.
+    private val closed = AtomicBoolean(false)
+
+    private fun deliverOnMain(callback: () -> Unit) = postToMain { if (!closed.get()) callback() }
+
     private val detectorEvents = object : WakeDetector.Events {
         override fun onReady(detectorId: String) {
             config.log("wake detector ready ($detectorId)")
-            postToMain { config.onDetectorReady(detectorId) }
+            deliverOnMain { config.onDetectorReady(detectorId) }
         }
 
         override fun onUnavailable(detectorId: String) {
             config.log("wake unavailable ($detectorId) — detector idle")
-            postToMain { config.onDetectorUnavailable(detectorId) }
+            deliverOnMain { config.onDetectorUnavailable(detectorId) }
         }
 
         override fun onWake(event: WakeEvent) {
+            if (closed.get()) {
+                config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
+                return
+            }
             val nowMs = clock()
             if (inHandoffCooldown(nowMs)) {
                 config.log("wake dropped (handoff cooldown) → ${event.wakeId} [${event.transcript}]")
@@ -88,8 +99,8 @@ class WakeMicEngine internal constructor(
             device = newDevice(),
             onFrame = { buf, n -> onFrame(built, buf, n) },
             onStarted = { onStarted(built) },
-            onStopped = { if (session === built) postToMain { config.onStopped() } },
-            onError = { if (session === built) postToMain { config.onError(it) } },
+            onStopped = { if (session === built) deliverOnMain { config.onStopped() } },
+            onError = { if (session === built) deliverOnMain { config.onError(it) } },
             log = config.log,
             threadName = "wake-capture",
             rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
@@ -99,11 +110,13 @@ class WakeMicEngine internal constructor(
     }
 
     fun start(): Boolean {
+        if (ignoredAfterClose("start()")) return false
         config.beforeMicAcquire()
-        if (session.start()) return true
-        config.log("wake capture wedged — rebuilding session and retrying")
-        session = buildSession()
-        return session.start()
+        return session.start() || run {
+            config.log("wake capture wedged — rebuilding session and retrying")
+            session = buildSession()
+            session.start()
+        }
     }
 
     /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
@@ -112,11 +125,17 @@ class WakeMicEngine internal constructor(
     }
 
     fun pause() {
+        if (ignoredAfterClose("pause()")) return
         session.stop()
         config.log("mic paused (yielded slot)")
     }
 
+    private fun ignoredAfterClose(call: String): Boolean =
+        closed.get().also { if (it) config.log("$call after close() ignored") }
+
+    /** Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered. */
     fun close() {
+        if (!closed.compareAndSet(false, true)) return
         session.stop()
         synchronized(detectorLock) { detectors.forEach { it.close() } }
     }
