@@ -43,9 +43,6 @@ internal class CaptureLossTracker(
     /** [WakeMicEngine.pause]: whatever stops capture from here on was asked for. */
     fun unwant() = synchronized(lock) { wanted = false }
 
-    /** The engine could not start a capture run at all. */
-    fun refused(reason: String) = raise(synchronized(lock) { generation }, CaptureLoss.NotGranted(reason))
-
     /** Capture thread: the mic opened and capture is running. */
     fun runStarted() {
         currentRun().started = true
