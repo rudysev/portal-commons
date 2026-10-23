@@ -11,6 +11,8 @@ plugins {
   // Each subproject applies it too (no auto-apply from the root). 3.19's kotlin-bom 2.4.0 sets the build's
   // kotlin-daemon-client to at least 2.4.0, so KGP must stay >= 2.4.0 or the Kotlin daemon fails (NoSuchMethodError).
   id("com.autonomousapps.dependency-analysis") version "3.19.2"
+  // detekt 2.0 is still alpha (1.x has no AGP 9 support); quality-tooling ticket 08 moves it to stable.
+  id("dev.detekt") version "2.0.0-alpha.6" apply false
   base
 }
 

@@ -5,6 +5,7 @@ plugins {
   id("com.android.library")
   id("com.autonomousapps.dependency-analysis") // `buildHealth` advice; version pinned in the root build
   id("org.jmailen.kotlinter")
+  id("dev.detekt")
 }
 
 // Shared Android-coupled helpers for the Portal apps (the bits that can't live in the pure-JVM :commons).
@@ -62,4 +63,17 @@ dependencies {
   // Real org.json for the VoskWakeDetector tests: main code calls it, the tests never reference it, so it is
   // only needed on the test runtime classpath (in place of android.jar's throwing stubs).
   testRuntimeOnly("org.json:json:20240303")
+}
+
+// detekt on the defaults plus the shared opt-ins in config/detekt/detekt.yml (identical in all three repos).
+detekt {
+  buildUponDefaultConfig = true
+  config.setFrom(rootProject.file("config/detekt/detekt.yml"))
+}
+
+// `check` runs the type-resolving tasks (detektMain/detektTest: main and test classes, every variant) instead of the
+// plugin's default `detekt` task, which analyses the same sources without type resolution.
+tasks.check {
+  setDependsOn(dependsOn.filterNot { it is TaskProvider<*> && it.name == "detekt" })
+  dependsOn("detektMain", "detektTest")
 }

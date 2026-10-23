@@ -6,6 +6,7 @@ plugins {
   id("com.android.lint")
   id("com.autonomousapps.dependency-analysis") // `buildHealth` advice; version pinned in the root build
   id("org.jmailen.kotlinter")
+  id("dev.detekt")
 }
 
 // Coordinates used by consuming apps via Gradle composite build (`includeBuild`) dependency
@@ -46,4 +47,17 @@ dependencies {
 tasks.test {
   useJUnit()
   testLogging { events("passed", "skipped", "failed") }
+}
+
+// detekt on the defaults plus the shared opt-ins in config/detekt/detekt.yml (identical in all three repos).
+detekt {
+  buildUponDefaultConfig = true
+  config.setFrom(rootProject.file("config/detekt/detekt.yml"))
+}
+
+// `check` runs the type-resolving tasks (detektMain/detektTest: main and test classes, every variant) instead of the
+// plugin's default `detekt` task, which analyses the same sources without type resolution.
+tasks.check {
+  setDependsOn(dependsOn.filterNot { it is TaskProvider<*> && it.name == "detekt" })
+  dependsOn("detektMain", "detektTest")
 }
