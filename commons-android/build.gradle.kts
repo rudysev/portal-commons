@@ -39,7 +39,8 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":commons")) // PcmDevice seam + PcmCaptureFormat
+    // PcmDevice seam + PcmCaptureFormat. `api`: they appear in this module's public signatures.
+    api(project(":commons"))
     // On-device wake-word recognition (VoskWakeDetector/WakeMicEngine) — free, keyless, offline, no GMS.
     implementation("com.alphacephei:vosk-android:0.3.75")
     testImplementation("junit:junit:4.13.2")
