@@ -457,6 +457,26 @@ class WakeMicEngineTest {
         assertEquals(emptyList<WakeEvent>(), wakes)
     }
 
+    @Test fun aWakeHeldUpPastACloseThatGaveUpWaitingNeverReachesTheConsumer() {
+        val wakeLogged = CountDownLatch(1)
+        val holdWake = CountDownLatch(1)
+        beforeLog = {
+            if (it.startsWith("wake detected")) {
+                wakeLogged.countDown()
+                holdWake.await()
+            }
+        }
+        newEngine().start()
+        detector.wakeOnNextAccept = "jarvis"
+        device.offer()
+        assertTrue(wakeLogged.await(2, TimeUnit.SECONDS))
+        engine.close() // the capture thread is held inside the frame, so close() gives up waiting for it
+        holdWake.countDown()
+        await("the detector closes once the frame ends") { detector.closes == 1 }
+
+        assertEquals(emptyList<WakeEvent>(), wakes)
+    }
+
     @Test fun closeFromInsideTheWakeCallbackClosesTheDetectorOnlyOnceTheFrameEnds() {
         closeOnWake = true
         newEngine().start()
