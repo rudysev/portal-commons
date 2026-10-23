@@ -14,7 +14,9 @@ import android.content.Context
  * **Threading contract.** [start], [accept], and [updateWakeWords] are all called on the engine's single
  * **capture thread**, at frame boundaries — so an implementation may keep capture-thread-only mutable state
  * without locks, and must never be closed mid-[accept] (the engine defers a wake-set swap to a frame
- * boundary for exactly this reason). [close] is called from the controlling thread after capture has stopped.
+ * boundary for exactly this reason). [close] is called at most once, never during another detector call: from the
+ * thread calling [WakeMicEngine.close], or, when a detector call is still running (a stuck native call that outlasts
+ * the bounded close, or a close from inside the wake callback), by the capture thread as it leaves that call.
  * The engine never runs two of these calls at once, even when it rebuilds a wedged capture session while the
  * old capture thread is still inside a detector call (two threads in one Vosk recognizer abort the process).
  * Readiness is asynchronous and may be frame-driven: the Vosk detector signals [Events.onReady] (and
@@ -51,7 +53,10 @@ interface WakeDetector {
      */
     fun updateWakeWords(words: List<WakeWord>)
 
-    /** Full teardown: release the model/native resources. Called from the controlling thread after stop. */
+    /**
+     * Full teardown: release the model/native resources. Called once, never during another detector call: from the
+     * thread closing the engine, or by the capture thread as it leaves a call the engine's bounded close outlasted.
+     */
     fun close()
 
     /** Dependencies supplied when the engine builds a detector. */

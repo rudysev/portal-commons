@@ -17,13 +17,24 @@ import java.util.concurrent.atomic.AtomicReference
  * covers the ~1 frame between a match and capture actually pausing for the handoff. (Re)starting capture closes
  * the window.
  *
- * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] on the capture thread, readiness on the
- * main thread via the poster, and a log line for each.
+ * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] synchronously on the capture thread,
+ * readiness and unavailability on the main thread, and a log line for each.
  *
- * Owns **capture loss**: from [start] until the next [pause] or [close] capture is wanted, and the first way it fails
- * to run is posted once as [WakeMicConfig.onCaptureLost]. A requested pause, a stale or discarded capture session, and
- * a loss a newer [start] has overtaken report nothing. After a loss the engine is idle, as after [pause]; it never
- * retries on its own.
+ * Owns **capture loss** (see `GLOSSARY.md`): from [start] until the next [pause] or [close] capture is wanted, and the
+ * first way it fails to run is reported once as [WakeMicConfig.onCaptureLost] with a [CaptureLoss] cause:
+ * [CaptureLoss.NotGranted] (the mic could not be opened, including a start refused because a previous capture is
+ * wedged) or [CaptureLoss.Dropped] (capture was running and died, including a failed rebuild). A requested pause, a
+ * stale or discarded capture session, and a loss a newer [start] has overtaken report nothing. After a loss the engine
+ * is idle, as after [pause]; it never retries on its own, so retry policy stays with the consumer.
+ *
+ * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onDetectorReady],
+ * [WakeMicConfig.onDetectorUnavailable]) is always posted to the main looper, never run inline, even when the event
+ * happens on the main thread, so none runs inside a call the consumer is making to the engine (its constructor
+ * included). The closed and capture-generation checks run when the callback is delivered, not when it is posted.
+ *
+ * **Closed state.** [close] is terminal and idempotent: after it no consumer callback is delivered (including ones
+ * already posted), and [start] and [pause] are logged no-ops. It is bounded and safe from any thread, including from
+ * inside the wake callback; see [close].
  *
  * **Mic-slot handoff & phone calls are NOT handled here** — the consumer drives [pause]/[start] for handoff
  * and call stand-down. [pause] yields the slot; [start] reacquires it, running [WakeMicConfig.beforeMicAcquire]
@@ -121,6 +132,11 @@ class WakeMicEngine internal constructor(
         return built
     }
 
+    /**
+     * Wants capture and (re)acquires the mic, running [WakeMicConfig.beforeMicAcquire] first. Returns nothing: a mic
+     * that can't be opened, or a start refused because a previous capture thread is wedged, arrives later as a posted
+     * [CaptureLoss.NotGranted]. A logged no-op after [close].
+     */
     fun start() {
         if (ignoredAfterClose("start()")) return
         config.beforeMicAcquire()
@@ -137,6 +153,10 @@ class WakeMicEngine internal constructor(
         pendingWakeWords.set(words)
     }
 
+    /**
+     * Stops wanting capture and yields the mic slot. Reports no capture loss, and cancels one already posted but not
+     * yet delivered. A harmless no-op after a loss; a logged no-op after [close].
+     */
     fun pause() {
         if (ignoredAfterClose("pause()")) return
         losses.unwant()
@@ -152,7 +172,9 @@ class WakeMicEngine internal constructor(
      *
      * Bounded: the session's stop join and the wait for a detector call to finish share one [CLOSE_DEADLINE_MS], and
      * the mic slot is free when it returns. Detectors still busy then, or busy in the calling thread (a close from
-     * inside the wake callback), are closed by the capture thread as it leaves them, never in the middle of a call.
+     * inside the wake callback), are closed by the capture thread as it leaves them, never in the middle of a call; a
+     * close that runs out of time logs a `🔴` line. If that call never returns, the detectors' native resources leak
+     * until the process dies.
      */
     fun close() {
         if (!closed.compareAndSet(false, true)) return

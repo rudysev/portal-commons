@@ -10,7 +10,9 @@ import com.portal.commons.DebugLog
  *   the consumer can pause capture with minimum latency (~one frame) before handoff. Post to your service's
  *   main/arbiter thread before touching UI or other capture state.
  * - [onDetectorReady], [onDetectorUnavailable], [onCaptureLost] — **main thread**. The engine always posts
- *   these to the main looper (never runs them inline), so consumers can update service/UI state directly.
+ *   these to the main looper and never runs them inline, even when the event happens on the main thread, so none
+ *   runs inside a call you are making to the engine (its constructor included). Consumers can update service/UI state
+ *   directly. None is delivered after [WakeMicEngine.close], including ones already posted.
  * - [beforeMicAcquire] — **caller thread** of [WakeMicEngine.start], synchronously before the mic is opened.
  */
 data class WakeMicConfig(
