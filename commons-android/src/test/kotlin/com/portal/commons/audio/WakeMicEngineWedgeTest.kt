@@ -32,6 +32,7 @@ class WakeMicEngineWedgeTest {
         val overlaps = CopyOnWriteArrayList<String>()
         val closes = CountDownLatch(1)
         val firstAcceptEntered = CountDownLatch(1)
+        val acceptCount get() = accepts.get()
 
         private inline fun enter(what: String, work: () -> Unit) {
             if (inside.incrementAndGet() > 1) overlaps.add(what)
@@ -71,6 +72,12 @@ class WakeMicEngineWedgeTest {
     }
 
     private val logs = CopyOnWriteArrayList<String>()
+    private val losses = CopyOnWriteArrayList<CaptureLoss>()
+    private val posted = CopyOnWriteArrayList<Runnable>()
+
+    private fun runPosted() {
+        while (posted.isNotEmpty()) posted.removeAt(0).run()
+    }
 
     private fun newEngine(detector: OverlapDetector) = WakeMicEngine(
         ContextWrapper(null),
@@ -78,10 +85,11 @@ class WakeMicEngineWedgeTest {
             wakeWords = emptyList(),
             detectors = listOf(WakeDetector.Factory { detector }),
             onWake = {},
+            onCaptureLost = { losses.add(it) },
             log = { logs.add(it) },
         ),
         newDevice = ::Device,
-        postToMain = { it.run() },
+        postToMain = { posted.add(it) },
     )
 
     private fun replayWedge(detector: OverlapDetector): List<String> {
@@ -113,6 +121,26 @@ class WakeMicEngineWedgeTest {
         val detector = OverlapDetector(firstAcceptMs = 600) // a slow decode, longer than the 400 ms join
         assertEquals(wedged, replayWedge(detector))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
+    }
+
+    @Test(timeout = 10_000)
+    fun aStartAfterAWedgedPauseCapturesOnAFreshSessionAndDeliversNoCaptureLoss() {
+        val detector = OverlapDetector(firstAcceptMs = 600) // a slow decode, longer than the 400 ms join
+        val engine = newEngine(detector)
+        engine.start()
+        assertTrue(detector.firstAcceptEntered.await(2, TimeUnit.SECONDS))
+        engine.pause() // the join times out: that thread is still in the detector
+        engine.start()
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (detector.acceptCount < 3 && System.nanoTime() < deadline) Thread.sleep(10)
+        runPosted()
+        engine.close()
+        runPosted()
+
+        assertTrue("the fresh session never captured", detector.acceptCount >= 3)
+        assertTrue(logs.contains("wake capture wedged — rebuilding session and retrying"))
+        assertEquals(emptyList<CaptureLoss>(), losses)
     }
 
     @Test(timeout = 10_000)
