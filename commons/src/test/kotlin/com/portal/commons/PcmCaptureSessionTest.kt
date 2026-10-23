@@ -419,13 +419,8 @@ class PcmCaptureSessionTest {
         assertFalse("start() must refuse while the previous thread is alive", session.start())
 
         fake.unpark() // thread can now exit
-        var restarted = false
-        for (i in 0 until 100) {
-            if (session.start()) {
-                restarted = true
-                break
-            }
-            Thread.sleep(20)
+        val restarted = (0 until 100).any {
+            session.start().also { started -> if (!started) Thread.sleep(20) }
         }
         assertTrue("start() should succeed once the previous thread exits", restarted)
         session.stop()
@@ -602,13 +597,8 @@ class PcmCaptureSessionTest {
         await(stopped)
 
         // Once the loop has exited, start() succeeds again.
-        var restarted = false
-        for (i in 0 until 100) {
-            if (session.start()) {
-                restarted = true
-                break
-            }
-            Thread.sleep(20)
+        val restarted = (0 until 100).any {
+            session.start().also { started -> if (!started) Thread.sleep(20) }
         }
         assertTrue("start() should succeed after the loop fully exits", restarted)
         session.stop()

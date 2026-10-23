@@ -37,7 +37,7 @@ class VoskWakeDetectorRaceTest {
         loadRacing { d.updateWakeWords(listOf(ALEXA)) }
         d.accept(frame(2), FRAME)
 
-        val live = model.decoders.filter { it.fed.isNotEmpty() }.single()
+        val live = model.decoders.single { it.fed.isNotEmpty() }
         assertEquals("""["hey alexa", "alexa", "hey", "[unk]"]""", live.grammar)
         assertTrue("every other decoder freed", (model.decoders - live).all { it.closed })
     }
