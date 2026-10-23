@@ -60,7 +60,8 @@ internal class VoskWakeDetector(
         try {
             loader.load(::onModelDelivered) { events.onUnavailable(ID) }
         } catch (
-            @Suppress("SwallowedException")
+            // Throwable, not Exception: native init fails with Errors too (UnsatisfiedLinkError from libvosk).
+            @Suppress("SwallowedException", "TooGenericExceptionCaught")
             t: Throwable,
         ) {
             // The throwable is intentionally swallowed: don't let a model-load / native-init failure crash the

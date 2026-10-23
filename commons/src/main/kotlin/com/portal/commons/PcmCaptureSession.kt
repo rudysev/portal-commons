@@ -143,7 +143,12 @@ class PcmCaptureSession(
             // session's onStarted ran Vosk's reset + warm-up past the stop join, alongside the rebuilt session.
             if (running) onStarted()
             capture.run()
-        } catch (e: Throwable) {
+        } catch (
+            // Last line of defence on the capture thread: anything escaping here would be an uncaught exception on
+            // a background thread, which kills the host app's process. Log it; the finally still frees the mic.
+            @Suppress("TooGenericExceptionCaught")
+            e: Throwable,
+        ) {
             log("pcm capture EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             runCatching { device.stop() }
