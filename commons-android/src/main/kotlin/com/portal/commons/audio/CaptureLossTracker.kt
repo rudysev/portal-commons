@@ -27,13 +27,17 @@ internal class CaptureLossTracker(
 
     private fun currentRun(): Run = run.get() ?: Run(synchronized(lock) { generation }).also { run.set(it) }
 
-    /** [WakeMicEngine.start]: a new generation, unless the current one is still wanted and has raised nothing. */
-    fun want() = synchronized(lock) {
-        if (!wanted || raised) {
-            generation++
-            raised = false
-        }
+    /**
+     * [WakeMicEngine.start]: begins a new generation and returns true, or returns false while the current one is still
+     * wanted and has raised nothing. Its run is then still opening, running or about to report how it ended, so that
+     * start must not start a run of its own: one started now could not be told apart from that run's late signals.
+     */
+    fun want(): Boolean = synchronized(lock) {
+        if (wanted && !raised) return false
+        generation++
+        raised = false
         wanted = true
+        true
     }
 
     /** [WakeMicEngine.pause]: whatever stops capture from here on was asked for. */

@@ -417,6 +417,39 @@ class WakeMicEngineTest {
         assertEquals(emptyList<CaptureLoss>(), losses)
     }
 
+    @Test fun aStartRacingTheStopOfAFailedRebuildLeavesTheNextLossReported() {
+        val stopReached = CountDownLatch(1)
+        val holdStop = CountDownLatch(1)
+        beforeLog = {
+            if (it == "pcm capture stopped") {
+                stopReached.countDown()
+                holdStop.await()
+            }
+        }
+        newEngine().start()
+        device.push()
+        device.failOpens = 1
+        device.failReads = true // the rebuild fails; the run has given up the session but not yet reported its stop
+        assertTrue(stopReached.await(2, TimeUnit.SECONDS))
+        device.failReads = false
+        engine.start() // the consumer starts again before that stop lands
+        holdStop.countDown()
+        await("the failed run's stop is reported") { logs.count { it == "pcm capture stopped" } == 1 }
+        Thread.sleep(50) // room for the stop to be posted
+        runPosted()
+        if (losses.isNotEmpty()) engine.start() // a consumer retries on a loss
+
+        device.push() // capture is running
+        device.failOpens = 1
+        device.failReads = true // and this run fails too
+        await("the second run's stop") { logs.count { it == "pcm capture stopped" } == 2 }
+        Thread.sleep(50)
+        runPosted()
+
+        assertEquals(CaptureLoss.Dropped("microphone unavailable on rebuild"), losses.lastOrNull())
+        assertEquals("the second run's loss went unreported", 2, losses.size)
+    }
+
     @Test fun aWakeRaisedAfterCloseNeverReachesTheConsumer() {
         newEngine().close()
         events.onWake(WakeEvent("fake", "jarvis", "after close"))
