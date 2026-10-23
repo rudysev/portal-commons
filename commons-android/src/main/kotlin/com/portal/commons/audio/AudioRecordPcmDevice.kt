@@ -28,6 +28,8 @@ class AudioRecordPcmDevice : PcmDevice {
     }
 
     /** A recording [AudioRecord], or null (nothing left open) when it can't be built or started. */
+    // MissingPermission: RECORD_AUDIO is the host app's to declare and request (a library can't). Without the grant
+    // the record fails to build or initialize, which this already reports as a clean failed open.
     @SuppressLint("MissingPermission")
     private fun startedRecord(minBuf: Int): AudioRecord? {
         val r = runCatching {
