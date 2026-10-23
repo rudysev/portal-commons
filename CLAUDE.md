@@ -37,8 +37,10 @@ and `.shellcheckrc` are identical copies in portal-commons, portal-wake and port
 
 ## CI
 
-`.github/workflows/ci.yml` runs `./gradlew check assembleDebug` on every push to `main` (and on
-`workflow_dispatch`). When it passes on `main`, it sends a `repository_dispatch` (`portal-commons-green`) that
+`.github/workflows/ci.yml` runs every check on a pull request to `main`: the `build` job runs `./gradlew check
+assembleDebug`, plus the `shellcheck` and `build-health` jobs below. A push to `main` (a merge) or `workflow_dispatch`
+runs only the `build` job, as `./gradlew assembleDebug test`. Branch protection on `main` requires a pull request
+with `shellcheck`, `build-health` and `build` passing, so keep those job names. When `build` passes on `main`, it sends a `repository_dispatch` (`portal-commons-green`) that
 re-runs CI in `portal-wake` and `portal-assistant`, because both build against `portal-commons@main`. This needs the
 `APP_DISPATCH_TOKEN` secret: a fine-grained PAT with Actions and Contents write on the two app repos.
 
