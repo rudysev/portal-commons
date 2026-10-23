@@ -51,10 +51,14 @@ class WakeMicEngineTest {
         override fun release() = Unit
     }
 
-    /** Counts frames it is fed and, when [wakeOnNextAccept] is set, fires that wake id from inside [accept]. */
+    /**
+     * Counts frames it is fed, records each wake-word hot swap it receives and, when [wakeOnNextAccept] is set, fires
+     * that wake id from inside [accept].
+     */
     private class FakeDetector(val host: WakeDetector.Host) : WakeDetector {
         override val id = "fake"
         val accepts = CopyOnWriteArrayList<Long>()
+        val wakeWordUpdates = CopyOnWriteArrayList<List<WakeWord>>()
 
         @Volatile var wakeOnNextAccept: String? = null
 
@@ -69,7 +73,9 @@ class WakeMicEngineTest {
             host.events.onWake(WakeEvent(id, wakeId, "transcript"))
         }
 
-        override fun updateWakeWords(words: List<WakeWord>) = Unit
+        override fun updateWakeWords(words: List<WakeWord>) {
+            wakeWordUpdates.add(words)
+        }
 
         @Volatile var closes = 0
 
@@ -251,6 +257,15 @@ class WakeMicEngineTest {
         runPosted()
 
         assertEquals(listOf("fake"), ready)
+    }
+
+    @Test fun aWakeWordHotSwapReachesEveryDetectorBeforeItsNextFrame() {
+        newEngine(detectorCount = 2).start()
+        engine.updateWakeWords(listOf(ALEXA))
+        device.push()
+
+        detectors.forEach { assertEquals(listOf(listOf(ALEXA)), it.wakeWordUpdates) }
+        assertTrue(logs.contains("wake set changed → rebuilding grammar (1 word(s))"))
     }
 
     @Test fun diagnosticsAreLoggedWithTheDetectorId() {

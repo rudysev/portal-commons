@@ -5,6 +5,7 @@ import com.portal.commons.PcmCaptureSession
 import com.portal.commons.PcmDevice
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
@@ -89,7 +90,9 @@ class WakeMicEngine internal constructor(
     // detector when start() rebuilds the session, and a Vosk recognizer run from two threads aborts the process.
     private val detectorLock = Any()
 
-    @Volatile private var pendingWakeWords: List<WakeWord>? = null
+    // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
+    // the read and the clear is never lost.
+    private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
 
     @Volatile private var session = buildSession()
 
@@ -121,7 +124,7 @@ class WakeMicEngine internal constructor(
 
     /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
     fun updateWakeWords(words: List<WakeWord>) {
-        pendingWakeWords = words
+        pendingWakeWords.set(words)
     }
 
     fun pause() {
@@ -159,8 +162,7 @@ class WakeMicEngine internal constructor(
     }
 
     private fun applyPendingWakeWords() {
-        val words = pendingWakeWords ?: return
-        pendingWakeWords = null
+        val words = pendingWakeWords.getAndSet(null) ?: return
         config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
         detectors.forEach { it.updateWakeWords(words) }
     }
