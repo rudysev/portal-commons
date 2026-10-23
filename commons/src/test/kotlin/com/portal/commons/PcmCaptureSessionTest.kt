@@ -56,8 +56,17 @@ class PcmCaptureSessionTest {
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
             readCount.incrementAndGet()
-            if (failReads) return -1
-            if (framesToServe <= 0) return 0 // idle: no data right now (NOT an error)
+            return when {
+                failReads -> -1
+
+                framesToServe <= 0 -> 0
+
+                // idle: no data right now (NOT an error)
+                else -> serve(length)
+            }
+        }
+
+        private fun serve(length: Int): Int {
             val give = minOf(length, bytesPerRead, PcmCaptureFormat.FRAME_BYTES - frameBytesServed)
             frameBytesServed += give
             if (frameBytesServed >= PcmCaptureFormat.FRAME_BYTES) {

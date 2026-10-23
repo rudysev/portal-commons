@@ -93,8 +93,7 @@ object DebugLog {
     internal fun awaitIdle(timeoutMs: Long = 2_000): Boolean {
         worker ?: return true
         val latch = CountDownLatch(1)
-        if (!offerControl(Barrier(latch))) return false
-        return latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        return offerControl(Barrier(latch)) && latch.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
     /** Enqueue a control command (SwitchFile/Barrier) into the headroom [log] keeps free; non-blocking. */

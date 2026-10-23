@@ -64,11 +64,17 @@ internal class IdleResetPolicy(
      */
     fun decide(nowMs: Long, isMidUtterance: () -> Boolean): Decision {
         val unflushedMs = nowMs - flushedAtMs
-        if (unflushedMs < quietResetMs) return Decision.KEEP
-        // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a real
-        // "hey" is still settling. forceResetMs caps how long that deferral can hold the reset off.
-        if (!isMidUtterance()) return Decision.RESET
-        return if (unflushedMs >= forceResetMs) Decision.FORCE_RESET else Decision.KEEP
+        return when {
+            unflushedMs < quietResetMs -> Decision.KEEP
+
+            // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a real
+            // "hey" is still settling. forceResetMs caps how long that deferral can hold the reset off.
+            !isMidUtterance() -> Decision.RESET
+
+            unflushedMs >= forceResetMs -> Decision.FORCE_RESET
+
+            else -> Decision.KEEP
+        }
     }
 
     companion object {

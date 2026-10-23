@@ -139,22 +139,18 @@ internal class VoskWakeDetector(
         val dec = buildDecoder(m, wakeWords)
         if (dec == null) {
             events.onUnavailable(ID)
-            return false
+        } else {
+            decoder = dec
+            events.onReady(ID)
         }
-        decoder = dec
-        events.onReady(ID)
-        return true
+        return dec != null
     }
 
     /** Decode the pre-ready buffer in order, stopping at the first wake. True if a wake fired. */
     private fun replayPreReadyFrames(): Boolean {
         val buffered = preReadyBuffer.drain()
-        if (buffered.isEmpty()) return false
-        events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
-        for (frame in buffered) {
-            if (decode(frame, frame.size)) return true
-        }
-        return false
+        if (buffered.isNotEmpty()) events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
+        return buffered.any { frame -> decode(frame, frame.size) } // any() stops at the first wake
     }
 
     private fun maybeIdleReset() {
@@ -181,16 +177,15 @@ internal class VoskWakeDetector(
      * dropped-lead suspect). The decode is carried so the log shows *what Vosk heard*. True if a wake fired.
      */
     private fun decode(buf: ByteArray, n: Int): Boolean {
-        val dec = decoder ?: return false
-        if (!dec.acceptFrame(buf, n)) return false
+        val dec = decoder
+        if (dec == null || !dec.acceptFrame(buf, n)) return false
         idleReset.noteFlushed(clock())
         val words = parseResult(dec.finalResult())
         val transcript = render(words)
-        when (val o = WakeMatcher.evaluate(words, wakeWords)) {
-            is WakeMatcher.Outcome.Match -> {
+        val outcome = WakeMatcher.evaluate(words, wakeWords)
+        when (val o = outcome) {
+            is WakeMatcher.Outcome.Match ->
                 events.onWake(WakeEvent(ID, o.id, transcript))
-                return true
-            }
 
             is WakeMatcher.Outcome.NearMiss ->
                 events.onDiagnostic(ID, "near-miss [$transcript] rejected: ${o.reason}")
@@ -198,7 +193,7 @@ internal class VoskWakeDetector(
             WakeMatcher.Outcome.None ->
                 if (transcript.isNotEmpty()) events.onDiagnostic(ID, "flushed final [$transcript]")
         }
-        return false
+        return outcome is WakeMatcher.Outcome.Match
     }
 
     /**
@@ -283,15 +278,16 @@ internal class VoskWakeDetector(
         private fun parseResult(json: String): List<RecWord> {
             val obj = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
             val arr = obj.optJSONArray("result")
-            if (arr != null && arr.length() > 0) {
-                return (0 until arr.length()).mapNotNull { idx ->
-                    val o = arr.optJSONObject(idx) ?: return@mapNotNull null
-                    RecWord(o.optString("word"), o.optDouble("conf", NO_CONF))
-                }
-            }
             val text = obj.optString("text").trim()
-            if (text.isEmpty()) return emptyList()
-            return text.split(Regex("\\s+")).map { RecWord(it, NO_CONF) }
+            return when {
+                arr != null && arr.length() > 0 -> (0 until arr.length()).mapNotNull { idx ->
+                    arr.optJSONObject(idx)?.let { o -> RecWord(o.optString("word"), o.optDouble("conf", NO_CONF)) }
+                }
+
+                text.isEmpty() -> emptyList()
+
+                else -> text.split(Regex("\\s+")).map { RecWord(it, NO_CONF) }
+            }
         }
 
         /** The hypothesis text of a Vosk partial-result JSON (`{"partial" : "hey jar"}`); empty if quiet/malformed. */

@@ -106,15 +106,16 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
 
     override fun acceptFrame(buf: ByteArray, n: Int): Boolean {
         val copy = buf.copyOf(n)
-        if (copy.size == PcmCaptureFormat.FRAME_BYTES && copy.all { it == 0.toByte() }) {
+        val silent = copy.size == PcmCaptureFormat.FRAME_BYTES && copy.all { it == 0.toByte() }
+        if (silent) {
             log.add("silence")
-            return false
+        } else {
+            fed.add(copy)
+            log.add("frame:${copy[0]}")
         }
-        fed.add(copy)
-        log.add("frame:${copy[0]}")
-        if (copy.size < 2 || copy[1] != ENDPOINT) return false
-        lastFinal = finals.poll() ?: """{"text" : ""}"""
-        return true
+        val endpointed = !silent && copy.size >= 2 && copy[1] == ENDPOINT
+        if (endpointed) lastFinal = finals.poll() ?: """{"text" : ""}"""
+        return endpointed
     }
 
     override fun finalResult(): String = lastFinal

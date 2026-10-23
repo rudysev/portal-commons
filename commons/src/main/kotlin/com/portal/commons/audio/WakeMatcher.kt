@@ -143,7 +143,7 @@ object WakeMatcher {
      * [Outcome.None]. The gate order is identical to [match] — this only adds the rejection reason.
      */
     fun evaluate(words: List<RecWord>, wakeWords: List<WakeWord>): Outcome {
-        if (words.isEmpty()) return Outcome.None
+        // No words means no keyword is found below, so an empty decode falls through to [Outcome.None].
         // Fold consecutive duplicate tokens (Vosk can split one spoken "hey" into several) BEFORE the gates,
         // so a repeated lead doesn't trip the clean-phrase length limit — see [collapseRepeats].
         val lower = collapseRepeats(words.map { RecWord(it.word.lowercase(), it.conf) })
@@ -169,36 +169,58 @@ object WakeMatcher {
      * lives, so [match] and the near-miss log can never disagree.
      */
     private fun rejectionReason(lower: List<RecWord>, i: Int, w: WakeWord, wakeWords: List<WakeWord>): String? {
-        // Must be preceded by the word's declared lead (e.g. "hey", "hi"). A word with no declared lead
-        // (leads == null) skips this prefix gate.
         val before = lower.subList(0, i)
         val leads = acceptedLeads(w)
-        if (leads != null && before.none { it.word in leads }) return "no '${w.lead}' before '${w.keyword}'"
+        return when {
+            // Must be preceded by the word's declared lead (e.g. "hey", "hi"). A word with no declared lead
+            // (leads == null) skips this prefix gate.
+            leads != null && before.none { it.word in leads } -> "no '${w.lead}' before '${w.keyword}'"
 
-        val cleanPhrase = lower.size <= CLEAN_PHRASE_MAX_WORDS
-        if (w.minConf > BASELINE_CONF) {
             // Strict route = any floor above BASELINE_CONF (the jarvis/alexa defaults, and any plugin
-            // word > 0.50). Demand an UNCONTAMINATED, CLEAN phrase, a CONFIDENT lead, the keyword over its
-            // floor, and no rival wake keyword — see the class KDoc for why mere lead *presence* isn't enough.
-            // Contamination first: an "[unk]" in the final means non-wake audio decoded in the same window. A
-            // genuine close-mic wake decodes as a bare "<hey> <keyword>" with no "[unk]" (observed across every
-            // real fire); a leading/trailing "[unk]" is the tell-tale of background audio assembling a wake
-            // (observed live FP: `[unk](51) hey(99) jarvis(99)` — both words maxed, so no confidence floor
-            // could catch it). Strict = uncontaminated, so reject any "[unk]" outright.
-            if (lower.any { it.word == UNK_TOKEN }) return "contaminated ('$UNK_TOKEN' in decode)"
-            if (!cleanPhrase) return "phrase too long (${lower.size} words > $CLEAN_PHRASE_MAX_WORDS)"
-            if (leads != null && before.none { it.word in leads && it.conf >= LEAD_MIN_CONF }) {
-                return "'${w.lead}' under $LEAD_MIN_CONF floor"
-            }
-            if (lower[i].conf < w.minConf) return "'${w.keyword}' ${conf(lower[i].conf)} under ${w.minConf} floor"
-            if (containsRivalKeyword(lower, w, wakeWords)) return "rival wake keyword in decode"
-            return null
+            // word > 0.50).
+            w.minConf > BASELINE_CONF -> strictRejectionReason(lower, i, w, wakeWords, leads)
+
+            // Lenient route (e.g. a low-floor custom word): a clean short phrase fires even under-confident
+            // (the recall net), else the keyword must clear its floor.
+            lower.size <= CLEAN_PHRASE_MAX_WORDS || lower[i].conf >= w.minConf -> null
+
+            else -> underFloor(lower[i], w)
         }
-        // Lenient route (e.g. a low-floor custom word): a clean short phrase fires even under-confident
-        // (the recall net), else the keyword must clear its floor.
-        if (cleanPhrase || lower[i].conf >= w.minConf) return null
-        return "'${w.keyword}' ${conf(lower[i].conf)} under ${w.minConf} floor"
     }
+
+    /**
+     * The strict route's gates for the keyword at index [i] (its lead gate already passed): demand an
+     * UNCONTAMINATED, CLEAN phrase, a CONFIDENT lead, the keyword over its floor, and no rival wake keyword —
+     * see the class KDoc for why mere lead *presence* isn't enough. Null if the word fires.
+     */
+    private fun strictRejectionReason(
+        lower: List<RecWord>,
+        i: Int,
+        w: WakeWord,
+        wakeWords: List<WakeWord>,
+        leads: Set<String>?,
+    ): String? = when {
+        // Contamination first: an "[unk]" in the final means non-wake audio decoded in the same window. A
+        // genuine close-mic wake decodes as a bare "<hey> <keyword>" with no "[unk]" (observed across every
+        // real fire); a leading/trailing "[unk]" is the tell-tale of background audio assembling a wake
+        // (observed live FP: `[unk](51) hey(99) jarvis(99)` — both words maxed, so no confidence floor
+        // could catch it). Strict = uncontaminated, so reject any "[unk]" outright.
+        lower.any { it.word == UNK_TOKEN } -> "contaminated ('$UNK_TOKEN' in decode)"
+
+        lower.size > CLEAN_PHRASE_MAX_WORDS -> "phrase too long (${lower.size} words > $CLEAN_PHRASE_MAX_WORDS)"
+
+        leads != null && lower.subList(0, i).none { it.word in leads && it.conf >= LEAD_MIN_CONF } ->
+            "'${w.lead}' under $LEAD_MIN_CONF floor"
+
+        lower[i].conf < w.minConf -> underFloor(lower[i], w)
+
+        containsRivalKeyword(lower, w, wakeWords) -> "rival wake keyword in decode"
+
+        else -> null
+    }
+
+    /** The rejection reason for a [keyword] decoded under [w]'s confidence floor. */
+    private fun underFloor(keyword: RecWord, w: WakeWord): String = "'${w.keyword}' ${conf(keyword.conf)} under ${w.minConf} floor"
 
     /** Render a confidence for a log reason (`conf%`, or `?` when the recognizer gave no score). */
     private fun conf(c: Double): String = if (c < 0) "?" else "${(c * 100).toInt()}%"

@@ -19,10 +19,17 @@ import com.portal.commons.PcmDevice
 class AudioRecordPcmDevice : PcmDevice {
     @Volatile private var record: AudioRecord? = null
 
-    @SuppressLint("MissingPermission")
     override fun open(): Boolean {
         val minBuf = AudioRecord.getMinBufferSize(PcmCaptureFormat.SAMPLE_RATE, CHANNEL, ENCODING)
-        if (minBuf <= 0) return false // ERROR / ERROR_BAD_VALUE: this rate/channel/encoding isn't supported
+        // minBuf <= 0 is ERROR / ERROR_BAD_VALUE: this rate/channel/encoding isn't supported.
+        val r = if (minBuf > 0) startedRecord(minBuf) else null
+        if (r != null) record = r
+        return r != null
+    }
+
+    /** A recording [AudioRecord], or null (nothing left open) when it can't be built or started. */
+    @SuppressLint("MissingPermission")
+    private fun startedRecord(minBuf: Int): AudioRecord? {
         val r = runCatching {
             AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
@@ -31,17 +38,14 @@ class AudioRecordPcmDevice : PcmDevice {
                 ENCODING,
                 maxOf(minBuf, PcmCaptureFormat.FRAME_BYTES * 4),
             )
-        }.getOrNull() ?: return false
+        }.getOrNull() ?: return null
         runCatching { r.startRecording() }
-        if (!captureReady(r.state, r.recordingState)) {
-            // Not initialized, or startRecording() failed (slot busy / threw) — report a clean failed open
-            // so the capture session retries/rebuilds, instead of returning a "ready" device that only
-            // yields read errors.
-            runCatching { r.release() }
-            return false
-        }
-        record = r
-        return true
+        val ready = captureReady(r.state, r.recordingState)
+        // Not initialized, or startRecording() failed (slot busy / threw) — report a clean failed open
+        // so the capture session retries/rebuilds, instead of returning a "ready" device that only
+        // yields read errors.
+        if (!ready) runCatching { r.release() }
+        return r.takeIf { ready }
     }
 
     // Non-blocking: returns bytes read, 0 if nothing buffered, or a negative value AudioRecord error code
