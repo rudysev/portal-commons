@@ -19,3 +19,6 @@ secrets.properties
 *.pem
 *.p12
 *.key
+
+# Local-markdown issue tracker (see docs/agents/issue-tracker.md) — kept private.
+.scratch/
