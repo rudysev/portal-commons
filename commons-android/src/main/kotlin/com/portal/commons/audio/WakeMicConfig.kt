@@ -28,8 +28,8 @@ data class WakeMicConfig(
 ) {
     companion object {
         /**
-         * The handoff cooldown: for this long after a match no detector is fed frames and a repeat of the same
-         * wake id is dropped, covering the gap until capture pauses for the handoff.
+         * The handoff cooldown: for this long after a wake is delivered no detector is fed frames and every
+         * further wake, whatever its wake id, is dropped, covering the gap until capture pauses for the handoff.
          */
         const val DEFAULT_WAKE_HANDOFF_COOLDOWN_MS = 1_500L
     }

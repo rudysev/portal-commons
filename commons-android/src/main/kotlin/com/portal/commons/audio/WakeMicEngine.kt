@@ -3,15 +3,17 @@ package com.portal.commons.audio
 import android.content.Context
 import com.portal.commons.PcmCaptureSession
 import com.portal.commons.PcmDevice
+import java.util.concurrent.TimeUnit
 
 /**
  * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
  * captured frame to every configured [WakeDetector]. Recognition policy lives behind the [WakeDetector] seam.
  *
- * Owns the **handoff cooldown**: after a wake fires, no detector is fed a frame until
- * [WakeMicConfig.wakeHandoffCooldownMs] has elapsed for every wake id that fired, and a repeat of the same wake
- * id inside its window is dropped before it reaches [WakeMicConfig.onWake]. This covers the ~1 frame between a
- * match and capture actually pausing for the handoff. (Re)starting capture clears every cooldown.
+ * Owns the **handoff cooldown**: one window, opened when any wake is delivered and lasting
+ * [WakeMicConfig.wakeHandoffCooldownMs] on a monotonic clock. Inside it no detector is fed a frame and every
+ * further wake, whatever its wake id, is dropped (and logged) before it reaches [WakeMicConfig.onWake]. This
+ * covers the ~1 frame between a match and capture actually pausing for the handoff. (Re)starting capture closes
+ * the window.
  *
  * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] on the capture thread, readiness on the
  * main thread via the poster, and a log line for each.
@@ -27,12 +29,17 @@ class WakeMicEngine internal constructor(
     private val config: WakeMicConfig,
     private val newDevice: () -> PcmDevice,
     private val postToMain: (Runnable) -> Unit,
-    private val clock: () -> Long = System::currentTimeMillis,
+    // Monotonic milliseconds, so a wall-clock jump can't hold the handoff cooldown open and leave the engine deaf.
+    private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
 ) {
     constructor(context: Context, config: WakeMicConfig) :
         this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
 
-    private val fireCooldown = FireCooldown(config.wakeHandoffCooldownMs)
+    // The handoff cooldown is open while clock() is before this instant. Touched on the capture thread only: under
+    // detectorLock in onStarted/onFrame, and in onWake, which detectors raise from inside accept.
+    private var handoffCooldownUntilMs = Long.MIN_VALUE
+
+    private fun inHandoffCooldown(nowMs: Long = clock()): Boolean = nowMs < handoffCooldownUntilMs
 
     private val detectorEvents = object : WakeDetector.Events {
         override fun onReady(detectorId: String) {
@@ -46,7 +53,12 @@ class WakeMicEngine internal constructor(
         }
 
         override fun onWake(event: WakeEvent) {
-            if (!fireCooldown.tryFire(event.wakeId, clock())) return
+            val nowMs = clock()
+            if (inHandoffCooldown(nowMs)) {
+                config.log("wake dropped (handoff cooldown) → ${event.wakeId} [${event.transcript}]")
+                return
+            }
+            handoffCooldownUntilMs = nowMs + config.wakeHandoffCooldownMs
             config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
             config.onWake(event)
         }
@@ -113,7 +125,7 @@ class WakeMicEngine internal constructor(
     // the detectors.
     private fun onStarted(from: PcmCaptureSession): Unit = synchronized(detectorLock) {
         if (from !== session) return
-        fireCooldown.reset()
+        handoffCooldownUntilMs = Long.MIN_VALUE
         detectors.forEach { it.start() }
     }
 
@@ -122,7 +134,7 @@ class WakeMicEngine internal constructor(
         applyPendingWakeWords()
         // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
         for (detector in detectors) {
-            if (fireCooldown.isAnyCoolingDown(clock())) return
+            if (inHandoffCooldown()) return
             detector.accept(buf, n)
         }
     }

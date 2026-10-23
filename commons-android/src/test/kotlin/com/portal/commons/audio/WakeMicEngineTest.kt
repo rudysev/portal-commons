@@ -143,7 +143,7 @@ class WakeMicEngineTest {
         assertEquals(emptyList<Long>(), second.accepts)
     }
 
-    @Test fun aRepeatOfTheSameWakeIdInsideTheCooldownNeverReachesTheConsumer() {
+    @Test fun aRepeatOfTheSameWakeIdInsideTheCooldownNeverReachesTheConsumerAndIsLogged() {
         newEngine().start()
         detector.wakeOnNextAccept = "jarvis"
         device.push()
@@ -151,22 +151,38 @@ class WakeMicEngineTest {
         events.onWake(WakeEvent("fake", "jarvis", "again"))
 
         assertEquals(listOf(WakeEvent("fake", "jarvis", "transcript")), wakes)
+        assertTrue(logs.contains("wake dropped (handoff cooldown) → jarvis [again]"))
     }
 
-    @Test fun aDifferentWakeIdIsHeldBackByTheFrameGateNotByTheDeDupe() {
+    @Test fun aDifferentWakeIdInsideTheCooldownIsDroppedTooAndLogged() {
         newEngine().start()
         detector.wakeOnNextAccept = "jarvis"
         device.push()
         nowMs = 500L
-        detector.wakeOnNextAccept = "alexa"
-        device.push() // gated: the detector never hears the frame that would have fired alexa
-        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
+        events.onWake(WakeEvent("fake", "alexa", "direct"))
 
-        events.onWake(WakeEvent("fake", "alexa", "direct")) // the de-dupe itself lets a different id through
-        assertEquals(listOf("jarvis", "alexa"), wakes.map { it.wakeId })
+        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
+        assertTrue(logs.contains("wake dropped (handoff cooldown) → alexa [direct]"))
     }
 
-    @Test fun restartingCaptureClearsEveryCooldown() {
+    @Test fun aWakeExactlyWhenTheCooldownElapsesIsDeliveredAndOpensAFreshWindow() {
+        newEngine().start()
+        detector.wakeOnNextAccept = "jarvis"
+        device.push()
+        nowMs = 1_500L
+        detector.wakeOnNextAccept = "alexa"
+        device.push()
+        nowMs = 2_999L
+        device.push()
+        events.onWake(WakeEvent("fake", "jarvis", "inside the fresh window"))
+        nowMs = 3_000L
+        device.push()
+
+        assertEquals(listOf("jarvis", "alexa"), wakes.map { it.wakeId })
+        assertEquals(listOf(0L, 1_500L, 3_000L), detector.accepts)
+    }
+
+    @Test fun restartingCaptureClosesTheCooldown() {
         newEngine().start()
         detector.wakeOnNextAccept = "jarvis"
         device.push()
@@ -174,7 +190,7 @@ class WakeMicEngineTest {
         engine.pause()
         engine.start()
         device.push()
-        events.onWake(WakeEvent("fake", "jarvis", "after restart"))
+        events.onWake(WakeEvent("fake", "alexa", "after restart"))
 
         assertEquals(listOf(0L, 500L), detector.accepts)
         assertEquals(listOf("transcript", "after restart"), wakes.map { it.transcript })
