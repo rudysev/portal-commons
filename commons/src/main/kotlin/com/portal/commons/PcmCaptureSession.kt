@@ -38,6 +38,9 @@ import java.util.concurrent.TimeUnit
  * so a consumer can't go silently deaf. The idle clock is monotonic ([System.nanoTime]) so a wall-clock jump
  * can't false-fire it. Both are transient mic-loss recovery (the always-listening apps opt in).
  */
+// The constructor is the whole configuration surface: everything after device/onFrame is an optional callback or
+// tuning knob with a default, and the apps pass them by name. A parameter object would only move the same list.
+@Suppress("LongParameterList")
 class PcmCaptureSession(
     private val device: PcmDevice,
     private val onFrame: (buf: ByteArray, n: Int) -> Unit,
