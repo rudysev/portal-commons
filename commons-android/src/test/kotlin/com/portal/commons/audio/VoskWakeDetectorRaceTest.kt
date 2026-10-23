@@ -18,7 +18,7 @@ class VoskWakeDetectorRaceTest {
     private val model = FakeVoskModel()
     private val events = RecordingEvents()
 
-    private fun detector() = VoskWakeDetector(loader, listOf(JARVIS), events, FakeCooldown(), clock = { 0L })
+    private fun detector() = VoskWakeDetector(loader, listOf(JARVIS), events, clock = { 0L })
 
     /** Deliver the model on a `wake-model-load` thread; [during] runs while that delivery is (or would be) mid-build. */
     private fun loadRacing(during: () -> Unit) {

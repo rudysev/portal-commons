@@ -22,8 +22,7 @@ internal class FireCooldown(private val handoffCooldownMs: Long) {
         return true
     }
 
-    /** True while [wakeId] is still inside a post-fire cooldown window armed by [tryFire]. */
-    fun isCoolingDown(wakeId: String, nowMs: Long): Boolean = nowMs < (until[wakeId] ?: 0L)
+    private fun isCoolingDown(wakeId: String, nowMs: Long): Boolean = nowMs < (until[wakeId] ?: 0L)
 
     /** True while any wake id is still inside a post-fire cooldown (the engine's frame gate). */
     fun isAnyCoolingDown(nowMs: Long): Boolean = until.values.any { nowMs < it }

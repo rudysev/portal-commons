@@ -149,7 +149,7 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
 }
 
 /** Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, `wake:<id> [<transcript>]`, or the diagnostic. */
-internal class RecordingEvents(private val onWakeHook: (WakeEvent) -> Unit = {}) : WakeDetector.Events {
+internal class RecordingEvents : WakeDetector.Events {
     val lines = CopyOnWriteArrayList<String>()
 
     override fun onReady(detectorId: String) {
@@ -162,19 +162,9 @@ internal class RecordingEvents(private val onWakeHook: (WakeEvent) -> Unit = {})
 
     override fun onWake(event: WakeEvent) {
         lines.add("wake:${event.wakeId} [${event.transcript}]")
-        onWakeHook(event)
     }
 
     override fun onDiagnostic(detectorId: String, message: String) {
         lines.add(message)
     }
-}
-
-/** A [WakeHandoffCooldown] the test switches by hand. */
-internal class FakeCooldown : WakeHandoffCooldown {
-    @Volatile var cooling = false
-
-    override fun isCoolingDown(wakeId: String) = cooling
-
-    override fun isAnyCoolingDown() = cooling
 }

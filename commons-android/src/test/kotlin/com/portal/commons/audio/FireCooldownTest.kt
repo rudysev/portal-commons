@@ -47,24 +47,6 @@ class FireCooldownTest {
         assertTrue("after reset, a fire is allowed immediately", c.tryFire("jarvis", 600L))
     }
 
-    @Test fun isCoolingDownFalseBeforeFirstFire() {
-        val c = FireCooldown(1_500L)
-        assertFalse(c.isCoolingDown("jarvis", nowMs = 0L))
-    }
-
-    @Test fun isCoolingDownTrueInsideWindow() {
-        val c = FireCooldown(1_500L)
-        assertTrue(c.tryFire("jarvis", 0L))
-        assertTrue(c.isCoolingDown("jarvis", 1_499L))
-        assertFalse(c.isCoolingDown("jarvis", 1_500L))
-    }
-
-    @Test fun isCoolingDownIndependentPerWakeId() {
-        val c = FireCooldown(1_500L)
-        assertTrue(c.tryFire("jarvis", 0L))
-        assertFalse(c.isCoolingDown("alexa", 500L))
-    }
-
     @Test fun isAnyCoolingDownTrueWhenAnyWakeIdIsCooling() {
         val c = FireCooldown(1_500L)
         assertFalse(c.isAnyCoolingDown(0L))

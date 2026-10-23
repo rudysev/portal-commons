@@ -22,16 +22,14 @@ class VoskWakeDetectorTest {
 
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()
-    private val cooldown = FakeCooldown()
     private val events = RecordingEvents()
 
     @Volatile private var now = 0L
 
     private fun detector(
         words: List<WakeWord> = listOf(JARVIS),
-        events: WakeDetector.Events = this.events,
         loader: VoskModelLoader = this.loader,
-    ) = VoskWakeDetector(loader, words, events, cooldown, clock = { now })
+    ) = VoskWakeDetector(loader, words, events, clock = { now })
 
     /** A detector whose model has loaded and which has been started at t=0, with the event log cleared. */
     private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): VoskWakeDetector = detector(words).also {
@@ -219,13 +217,14 @@ class VoskWakeDetectorTest {
         assertEquals(listOf("ready", "flushing 1 pre-ready frame(s)"), events.lines)
     }
 
-    @Test fun replayStopsOnceAWakeArmsTheCooldown() {
-        // The engine arms the cooldown synchronously inside onWake, as WakeMicEngine does.
-        val arming = RecordingEvents(onWakeHook = { cooldown.cooling = true })
-        val d = detector(events = arming)
+    @Test fun replayStopsAtTheFirstWake() {
+        // Everything after a replayed wake, including the frame that triggered the replay, falls inside the
+        // handoff cooldown, so none of it is decoded.
+        val d = detector()
         d.accept(frame(2, endpoint = true), FRAME)
-        d.accept(frame(3), FRAME)
+        d.accept(frame(3, endpoint = true), FRAME)
         d.accept(frame(4), FRAME)
+        model.finals.add(HEY_JARVIS_CONFIDENT)
         model.finals.add(HEY_JARVIS_CONFIDENT)
         loader.complete(model)
         d.accept(frame(5), FRAME)
@@ -233,44 +232,8 @@ class VoskWakeDetectorTest {
         assertEquals(listOf(2), model.live.fedTags())
         assertEquals(
             listOf("ready", "flushing 3 pre-ready frame(s)", "wake:jarvis [hey(97) jarvis(81)]"),
-            arming.lines,
+            events.lines,
         )
-    }
-
-    @Test fun nothingIsReplayedWhileAlreadyCoolingDown() {
-        val d = detector()
-        d.accept(frame(2), FRAME)
-        d.accept(frame(3), FRAME)
-        cooldown.cooling = true
-        loader.complete(model)
-        d.accept(frame(4), FRAME)
-
-        assertEquals(emptyList<Int>(), model.live.fedTags())
-        assertEquals(listOf("ready", "flushing 2 pre-ready frame(s)"), events.lines)
-    }
-
-    // ---- handoff cooldown gate ----------------------------------------------------------------------
-
-    @Test fun coolingDownSkipsInference() {
-        val d = readyDetector()
-        cooldown.cooling = true
-        model.finals.add(HEY_JARVIS_CONFIDENT)
-        d.accept(frame(3, endpoint = true), FRAME)
-        assertEquals(listOf(TAG_PRIME), model.live.fedTags())
-        assertEquals(emptyList<String>(), events.lines)
-
-        cooldown.cooling = false
-        d.accept(frame(3, endpoint = true), FRAME) // the queued decode was never consumed
-        assertEquals(listOf("wake:jarvis [hey(97) jarvis(81)]"), events.lines)
-    }
-
-    @Test fun coolingDownSkipsIdleReset() {
-        val d = readyDetector()
-        val before = model.live.log.toList()
-        cooldown.cooling = true
-        d.frameAt(FORCE)
-        assertEquals(emptyList<String>(), events.lines)
-        assertEquals(before, model.live.log) // not reset, not fed
     }
 
     // ---- idle reset: the timer ----------------------------------------------------------------------
