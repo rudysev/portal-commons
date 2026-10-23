@@ -3,6 +3,8 @@ plugins {
   // Applied by the :commons-android subproject (the shared Android mic shell). Pure :commons stays JVM-only.
   // AGP 9 brings built-in Kotlin support, so no standalone kotlin-android plugin is needed.
   id("com.android.library") version "9.2.1" apply false
+  // Android Lint for the pure-JVM :commons (same AGP version as com.android.library).
+  id("com.android.lint") version "9.2.1" apply false
   // ktlint via kotlinter (ADR 0001). 5.7.0 bundles ktlint 1.8.0, the version .githooks/pre-commit requires.
   id("org.jmailen.kotlinter") version "5.7.0"
   // Dependency advice (`./gradlew buildHealth`), run as its own CI job and not part of `check`.

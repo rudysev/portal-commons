@@ -25,6 +25,16 @@ android {
     targetCompatibility = JavaVersion.VERSION_11
   }
 
+  // Any lint warning fails the build. No baseline: suppress inline only, with a reason.
+  lint {
+    warningsAsErrors = true
+    abortOnError = true
+    checkReleaseBuilds = true
+    // Dependency-freshness checks query Maven/Google at lint time, so the result changes whenever upstream ships a
+    // release, not when this code changes. Dependency updates are deliberate (Renovate/Dependabot are out of scope).
+    disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "NewerVersionAvailable")
+  }
+
   testOptions {
     // Use the bundled org.json (testRuntimeOnly) instead of android.jar's throwing stubs, so the
     // Vosk detector's JSON parsing can be exercised in plain JVM unit tests.
@@ -39,6 +49,9 @@ kotlin {
     allWarningsAsErrors.set(true)
   }
 }
+
+// `check` lints only the default (debug) variant. Lint release too, the variant an app's release build consumes.
+tasks.check { dependsOn("lintRelease") }
 
 dependencies {
   // PcmDevice seam + PcmCaptureFormat. `api`: they appear in this module's public signatures.

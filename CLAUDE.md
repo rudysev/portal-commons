@@ -2,9 +2,16 @@
 
 ## Verification and hooks
 
-Verify with `./gradlew check` (unit tests + ktlint via kotlinter, including the Gradle scripts). Fix style with
-`./gradlew formatKotlin`. ktlint config is `.editorconfig` only (ADR 0001 in portal-apps); kotlinter 5.7.0 bundles
-ktlint 1.8.0, and `.githooks/pre-commit` refuses any other CLI version, so bump both together.
+Verify with `./gradlew check` (unit tests + Android Lint + ktlint via kotlinter, including the Gradle scripts). Fix
+style with `./gradlew formatKotlin`. ktlint config is `.editorconfig` only (ADR 0001 in portal-apps); kotlinter 5.7.0
+bundles ktlint 1.8.0, and `.githooks/pre-commit` refuses any other CLI version, so bump both together.
+
+Android Lint runs in both modules (`com.android.lint` on the pure-JVM `:commons`) with `warningsAsErrors` and
+`abortOnError`, so any warning fails `check`, which lints the debug and release variants. There is no
+`lint-baseline.xml`: suppress inline only (`@SuppressLint`, `tools:ignore`, `//noinspection`), each with a reason
+comment. The dependency-freshness checks (`AndroidGradlePluginVersion`, `GradleDependency`, `NewerVersionAvailable`)
+are disabled, because they query the network and fail whenever upstream ships a release. Reports:
+`*/build/reports/lint-results*.html`.
 
 Hooks: `git config core.hooksPath .githooks` once per clone. `pre-commit` runs the `ktlint` CLI on staged
 `.kt`/`.kts` files (rejects, never auto-fixes); `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate

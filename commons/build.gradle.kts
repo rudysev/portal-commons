@@ -2,6 +2,8 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
   kotlin("jvm")
+  // Android Lint on a pure-JVM module, so :commons gets the same gate as :commons-android.
+  id("com.android.lint")
   id("com.autonomousapps.dependency-analysis") // `buildHealth` advice; version pinned in the root build
   id("org.jmailen.kotlinter")
 }
@@ -25,6 +27,16 @@ kotlin {
     // Keep the build warning-free: any compiler warning fails compilation.
     allWarningsAsErrors.set(true)
   }
+}
+
+// Any lint warning fails the build. No baseline: suppress inline only, with a reason.
+lint {
+  warningsAsErrors = true
+  abortOnError = true
+  checkReleaseBuilds = true
+  // Dependency-freshness checks query Maven/Google at lint time, so the result changes whenever upstream ships a
+  // release, not when this code changes. Dependency updates are deliberate (Renovate/Dependabot are out of scope).
+  disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "NewerVersionAvailable")
 }
 
 dependencies {
