@@ -1,5 +1,12 @@
 # CLAUDE.md — portal-commons
 
+## CI
+
+`.github/workflows/ci.yml` runs `./gradlew test assembleDebug` on every push to `main` (and on
+`workflow_dispatch`). When it passes on `main`, it sends a `repository_dispatch` (`portal-commons-green`) that
+re-runs CI in `portal-wake` and `portal-assistant`, because both build against `portal-commons@main`. This needs the
+`APP_DISPATCH_TOKEN` secret: a fine-grained PAT with Actions and Contents write on the two app repos.
+
 ## Agent skills
 
 ### Issue tracker
