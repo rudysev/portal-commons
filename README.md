@@ -28,8 +28,8 @@ All package `com.portal.commons`.
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
 | `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s. Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
-| `WakeDetector` / `VoskWakeDetector` | Recognition seam; Vosk implementation owns [WakeRecognizer], pre-ready buffering, and idle-reset. |
-| `WakeRecognizer` | Vosk model load + grammar decode boundary (log-free; events routed by the engine). |
+| `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). |
+| `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay, idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
 
 ## Build / test (standalone)
 
