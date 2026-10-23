@@ -2,6 +2,7 @@ package com.portal.commons.audio
 
 import android.content.Context
 import com.portal.commons.PcmCaptureSession
+import com.portal.commons.PcmDevice
 
 /**
  * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
@@ -17,11 +18,14 @@ import com.portal.commons.PcmCaptureSession
  *
  * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
  */
-class WakeMicEngine(
+class WakeMicEngine internal constructor(
     context: Context,
     private val config: WakeMicConfig,
+    private val newDevice: () -> PcmDevice,
+    private val postToMain: (Runnable) -> Unit,
 ) {
-    private val postToMain = WakeCallbackThreads.mainThreadPoster()
+    constructor(context: Context, config: WakeMicConfig) :
+        this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
 
     private val eventHandler = WakeMicEventHandler(
         handoffCooldownMs = config.wakeHandoffCooldownMs,
@@ -41,6 +45,10 @@ class WakeMicEngine(
 
     private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }
 
+    // Serializes every detector call. A capture thread that overran pause()'s stop join can still be inside a
+    // detector when start() rebuilds the session, and a Vosk recognizer run from two threads aborts the process.
+    private val detectorLock = Any()
+
     @Volatile private var pendingWakeWords: List<WakeWord>? = null
 
     @Volatile private var session = buildSession()
@@ -48,9 +56,9 @@ class WakeMicEngine(
     private fun buildSession(): PcmCaptureSession {
         lateinit var built: PcmCaptureSession
         built = PcmCaptureSession(
-            device = AudioRecordPcmDevice(),
-            onFrame = ::onFrame,
-            onStarted = ::onStarted,
+            device = newDevice(),
+            onFrame = { buf, n -> onFrame(built, buf, n) },
+            onStarted = { onStarted(built) },
             onStopped = { if (session === built) postToMain { config.onStopped() } },
             onError = { if (session === built) postToMain { config.onError(it) } },
             log = config.log,
@@ -81,15 +89,19 @@ class WakeMicEngine(
 
     fun close() {
         session.stop()
-        detectors.forEach { it.close() }
+        synchronized(detectorLock) { detectors.forEach { it.close() } }
     }
 
-    private fun onStarted() {
+    // A discarded (wedged) session's thread may still call back once it unblocks; only the current one reaches
+    // the detectors.
+    private fun onStarted(from: PcmCaptureSession) = synchronized(detectorLock) {
+        if (from !== session) return
         eventHandler.reset()
         detectors.forEach { it.start() }
     }
 
-    private fun onFrame(buf: ByteArray, n: Int) {
+    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int) = synchronized(detectorLock) {
+        if (from !== session) return
         applyPendingWakeWords()
         detectors.forEach { it.accept(buf, n) }
     }
