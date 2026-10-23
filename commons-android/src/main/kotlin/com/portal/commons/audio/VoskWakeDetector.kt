@@ -214,29 +214,6 @@ internal class VoskWakeDetector(
         warmUp(dec)
     }
 
-    /**
-     * Build a warmed decoder biased to [words]; fall back to open vocabulary if the model rejects the grammar.
-     * Null if the build fails outright.
-     */
-    private fun buildDecoder(m: VoskModel, words: List<WakeWord>): VoskDecoder? = runCatching {
-        val dec = runCatching { m.newDecoder(buildGrammar(words)) }.getOrElse { m.newDecoder(null) }
-        warmUp(dec)
-        dec
-    }.getOrNull()
-
-    /**
-     * Prime Kaldi's online decoder with ~1 s of silence, not just one frame. A single frame forces the lazy
-     * decoding-graph allocation, but the online-decoding state needs more run-up to settle: otherwise the FIRST
-     * word of the first utterance after a reset (fresh start, handoff reclaim, idle reset) is dropped — observed
-     * on-device as `[jarvis(..)] rejected: no 'hey'` misses where the leading "hey" never decodes.
-     */
-    private fun warmUp(dec: VoskDecoder) {
-        runCatching {
-            val silence = ByteArray(PcmCaptureFormat.FRAME_BYTES)
-            repeat(WARMUP_SILENCE_FRAMES) { dec.acceptFrame(silence, silence.size) }
-        }
-    }
-
     companion object {
         const val ID = "vosk"
 
@@ -252,6 +229,29 @@ internal class VoskWakeDetector(
                 host.wakeWords,
                 host.events,
             )
+        }
+
+        /**
+         * Build a warmed decoder biased to [words]; fall back to open vocabulary if the model rejects the grammar.
+         * Null if the build fails outright.
+         */
+        private fun buildDecoder(m: VoskModel, words: List<WakeWord>): VoskDecoder? = runCatching {
+            val dec = runCatching { m.newDecoder(buildGrammar(words)) }.getOrElse { m.newDecoder(null) }
+            warmUp(dec)
+            dec
+        }.getOrNull()
+
+        /**
+         * Prime Kaldi's online decoder with ~1 s of silence, not just one frame. A single frame forces the lazy
+         * decoding-graph allocation, but the online-decoding state needs more run-up to settle: otherwise the FIRST
+         * word of the first utterance after a reset (fresh start, handoff reclaim, idle reset) is dropped — observed
+         * on-device as `[jarvis(..)] rejected: no 'hey'` misses where the leading "hey" never decodes.
+         */
+        private fun warmUp(dec: VoskDecoder) {
+            runCatching {
+                val silence = ByteArray(PcmCaptureFormat.FRAME_BYTES)
+                repeat(WARMUP_SILENCE_FRAMES) { dec.acceptFrame(silence, silence.size) }
+            }
         }
 
         /**
