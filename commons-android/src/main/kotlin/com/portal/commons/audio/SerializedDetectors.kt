@@ -11,7 +11,7 @@ import java.util.concurrent.locks.ReentrantLock
  * e.g. from the wake callback) only marks the detectors "close pending"; the call that holds the lock closes them as
  * it leaves, and no detector call starts after that.
  */
-internal class SerializedDetectors(private val detectors: List<WakeDetector>) {
+internal class SerializedDetectors(private val detectors: List<WakeDetector>, private val log: (String) -> Unit) {
     // Serializes every detector call. A capture thread that overran pause()'s stop join can still be inside a
     // detector when start() rebuilds the session, and a Vosk recognizer run from two threads aborts the process.
     private val lock = ReentrantLock()
@@ -39,7 +39,7 @@ internal class SerializedDetectors(private val detectors: List<WakeDetector>) {
      * [use], or when the wait runs out, it returns at once and the thread inside closes them as it leaves; a wait that
      * runs out is logged loudly, since a detector call that never returns leaks the detectors. Idempotent.
      */
-    fun close(timeoutMs: Long, log: (String) -> Unit) {
+    fun close(timeoutMs: Long) {
         closePending = true
         if (lock.isHeldByCurrentThread) return
         val acquired = try {
