@@ -220,7 +220,7 @@ class VoskWakeDetectorTest {
     }
 
     @Test fun replayStopsOnceAWakeArmsTheCooldown() {
-        // The engine arms the cooldown synchronously inside onWake, as WakeMicEventHandler does.
+        // The engine arms the cooldown synchronously inside onWake, as WakeMicEngine does.
         val arming = RecordingEvents(onWakeHook = { cooldown.cooling = true })
         val d = detector(events = arming)
         d.accept(frame(2, endpoint = true), FRAME)

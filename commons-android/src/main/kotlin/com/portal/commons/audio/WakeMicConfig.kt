@@ -27,7 +27,10 @@ data class WakeMicConfig(
     val log: (String) -> Unit = DebugLog::log,
 ) {
     companion object {
-        /** Suppresses re-fire of the same wake id for this long after a match, covering the handoff window. */
+        /**
+         * The handoff cooldown: for this long after a match no detector is fed frames and a repeat of the same
+         * wake id is dropped, covering the gap until capture pauses for the handoff.
+         */
         const val DEFAULT_WAKE_HANDOFF_COOLDOWN_MS = 1_500L
     }
 }

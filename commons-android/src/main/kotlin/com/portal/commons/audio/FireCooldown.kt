@@ -6,9 +6,9 @@ package com.portal.commons.audio
  * capture actually pausing for the handoff. Each wake id cools down independently.
  *
  * Pure and clock-free (the caller passes `nowMs`), single-threaded by contract (the engine's capture thread),
- * so it is unit-tested. [WakeMicEventHandler] exposes this as [WakeHandoffCooldown] for detectors.
+ * so it is unit-tested. [WakeMicEngine] uses it for both the de-dupe and its frame gate.
  */
-class FireCooldown(private val handoffCooldownMs: Long) {
+internal class FireCooldown(private val handoffCooldownMs: Long) {
 
     private val until = HashMap<String, Long>()
 
@@ -25,7 +25,7 @@ class FireCooldown(private val handoffCooldownMs: Long) {
     /** True while [wakeId] is still inside a post-fire cooldown window armed by [tryFire]. */
     fun isCoolingDown(wakeId: String, nowMs: Long): Boolean = nowMs < (until[wakeId] ?: 0L)
 
-    /** True while any wake id is still inside a post-fire cooldown (used by [VoskWakeDetector] to gate all inference). */
+    /** True while any wake id is still inside a post-fire cooldown (the engine's frame gate). */
     fun isAnyCoolingDown(nowMs: Long): Boolean = until.values.any { nowMs < it }
 
     /** Clear all cooldowns (on capture (re)start). */
