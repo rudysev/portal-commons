@@ -76,6 +76,8 @@ object WakeMatcher {
      */
     const val UNK_TOKEN = "[unk]"
 
+    private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
+
     /** One recognized word and its confidence (−1 when the recognizer gave no per-word score). */
     data class RecWord(val word: String, val conf: Double)
 
@@ -223,7 +225,7 @@ object WakeMatcher {
     private fun underFloor(keyword: RecWord, w: WakeWord): String = "'${w.keyword}' ${conf(keyword.conf)} under ${w.minConf} floor"
 
     /** Render a confidence for a log reason (`conf%`, or `?` when the recognizer gave no score). */
-    private fun conf(c: Double): String = if (c < 0) "?" else "${(c * 100).toInt()}%"
+    private fun conf(c: Double): String = if (c < 0) "?" else "${(c * PERCENT).toInt()}%"
 
     /**
      * A genuine "hey jarvis" never also contains "alexa": a decode carrying a *different* registered wake

@@ -4,6 +4,7 @@ import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.audio.WakeMatcher.RecWord
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -34,7 +35,7 @@ internal class VoskWakeDetector(
     private val events: WakeDetector.Events,
     // Monotonic milliseconds, for the idle-reset clock (a wall-clock jump could force a mid-decode reset).
     // Injected so tests drive time.
-    private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
 ) : WakeDetector {
 
     override val id: String = ID
@@ -221,6 +222,8 @@ internal class VoskWakeDetector(
 
         private const val NO_CONF = -1.0 // sentinel: the decoder gave no per-word confidence
 
+        private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
+
         private val PRE_READY_MAX_FRAMES = (8_000 / PcmCaptureFormat.FRAME_MS).toInt()
 
         fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
@@ -299,7 +302,7 @@ internal class VoskWakeDetector(
 
         /** Render the decode as `word(conf%)` tokens (confidence omitted when the model gave none). */
         private fun render(words: List<RecWord>): String = words.joinToString(" ") { w ->
-            if (w.conf < 0) w.word else "${w.word}(${(w.conf * 100).toInt()})"
+            if (w.conf < 0) w.word else "${w.word}(${(w.conf * PERCENT).toInt()})"
         }
     }
 }
