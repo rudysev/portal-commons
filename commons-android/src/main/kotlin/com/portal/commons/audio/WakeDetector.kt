@@ -38,7 +38,8 @@ interface WakeDetector {
     /**
      * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]). Report a match via [Host.events].
      * Called on the capture thread. An implementation that isn't ready yet should buffer or drop internally
-     * — the engine always delivers every frame.
+     * — the engine delivers every frame except those inside the handoff cooldown, which no detector hears
+     * (even one still loading).
      */
     fun accept(buf: ByteArray, n: Int)
 

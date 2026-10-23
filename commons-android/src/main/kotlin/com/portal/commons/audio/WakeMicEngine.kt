@@ -8,9 +8,13 @@ import com.portal.commons.PcmDevice
  * Owns the **mic + capture thread + frame assembly** over the shared [PcmCaptureSession], and fans each
  * captured frame to every configured [WakeDetector]. Recognition policy lives behind the [WakeDetector] seam.
  *
- * Post-fire de-dupe is per wake id for [WakeMicConfig.wakeHandoffCooldownMs] so the ~1 handoff frame before
- * capture actually pauses can't double-fire. Detectors query [WakeHandoffCooldown] via [WakeDetector.Host] to
- * skip inference during that window.
+ * Owns the **handoff cooldown**: after a wake fires, no detector is fed a frame until
+ * [WakeMicConfig.wakeHandoffCooldownMs] has elapsed for every wake id that fired, and a repeat of the same wake
+ * id inside its window is dropped before it reaches [WakeMicConfig.onWake]. This covers the ~1 frame between a
+ * match and capture actually pausing for the handoff. (Re)starting capture clears every cooldown.
+ *
+ * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] on the capture thread, readiness on the
+ * main thread via the poster, and a log line for each.
  *
  * **Mic-slot handoff & phone calls are NOT handled here** — the consumer drives [pause]/[start] for handoff
  * and call stand-down. [pause] yields the slot; [start] reacquires it, running [WakeMicConfig.beforeMicAcquire]
@@ -23,24 +27,44 @@ class WakeMicEngine internal constructor(
     private val config: WakeMicConfig,
     private val newDevice: () -> PcmDevice,
     private val postToMain: (Runnable) -> Unit,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     constructor(context: Context, config: WakeMicConfig) :
         this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
 
-    private val eventHandler = WakeMicEventHandler(
-        handoffCooldownMs = config.wakeHandoffCooldownMs,
-        wakeConsumer = config.onWake,
-        onDetectorReady = config.onDetectorReady,
-        onDetectorUnavailable = config.onDetectorUnavailable,
-        log = config.log,
-        postToMain = postToMain,
-    )
+    private val fireCooldown = FireCooldown(config.wakeHandoffCooldownMs)
+
+    private val detectorEvents = object : WakeDetector.Events {
+        override fun onReady(detectorId: String) {
+            config.log("wake detector ready ($detectorId)")
+            postToMain { config.onDetectorReady(detectorId) }
+        }
+
+        override fun onUnavailable(detectorId: String) {
+            config.log("wake unavailable ($detectorId) — detector idle")
+            postToMain { config.onDetectorUnavailable(detectorId) }
+        }
+
+        override fun onWake(event: WakeEvent) {
+            if (!fireCooldown.tryFire(event.wakeId, clock())) return
+            config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
+            config.onWake(event)
+        }
+
+        override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
+    }
 
     private val detectorHost = object : WakeDetector.Host {
         override val context: Context = context
         override val wakeWords: List<WakeWord> = config.wakeWords
-        override val events: WakeDetector.Events = eventHandler
-        override val handoffCooldown: WakeHandoffCooldown = eventHandler
+        override val events: WakeDetector.Events = detectorEvents
+
+        // Redundant now the engine gates frames itself; kept so the Vosk detector works unchanged.
+        override val handoffCooldown: WakeHandoffCooldown = object : WakeHandoffCooldown {
+            override fun isCoolingDown(wakeId: String) = fireCooldown.isCoolingDown(wakeId, clock())
+
+            override fun isAnyCoolingDown() = fireCooldown.isAnyCoolingDown(clock())
+        }
     }
 
     private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }
@@ -96,14 +120,18 @@ class WakeMicEngine internal constructor(
     // the detectors.
     private fun onStarted(from: PcmCaptureSession) = synchronized(detectorLock) {
         if (from !== session) return
-        eventHandler.reset()
+        fireCooldown.reset()
         detectors.forEach { it.start() }
     }
 
     private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int) = synchronized(detectorLock) {
         if (from !== session) return
         applyPendingWakeWords()
-        detectors.forEach { it.accept(buf, n) }
+        // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
+        for (detector in detectors) {
+            if (fireCooldown.isAnyCoolingDown(clock())) return
+            detector.accept(buf, n)
+        }
     }
 
     private fun applyPendingWakeWords() {
