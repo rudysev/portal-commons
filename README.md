@@ -39,13 +39,14 @@ Requires JDK 21.
 ./gradlew check   # unit tests + ktlint (kotlinter); ./gradlew formatKotlin fixes style
 ```
 
-Enable the git hooks once per clone (needs the ktlint CLI: `brew install ktlint`):
+Enable the git hooks once per clone (needs the ktlint and shellcheck CLIs: `brew install ktlint shellcheck`):
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-`pre-commit` runs ktlint on the staged Kotlin files and `pre-push` runs `./gradlew check`. `--no-verify` skips
+`pre-commit` runs ktlint on the staged Kotlin files and shellcheck on the staged shell scripts, and `pre-push`
+runs `./gradlew check`. `--no-verify` skips
 them deliberately.
 
 ## How apps consume it
