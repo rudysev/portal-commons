@@ -20,6 +20,11 @@ import java.util.concurrent.atomic.AtomicReference
  * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] on the capture thread, readiness on the
  * main thread via the poster, and a log line for each.
  *
+ * Owns **capture loss**: from [start] until the next [pause] or [close] capture is wanted, and the first way it fails
+ * to run is posted once as [WakeMicConfig.onCaptureLost]. A requested pause, a stale or discarded capture session, and
+ * a loss a newer [start] has overtaken report nothing. After a loss the engine is idle, as after [pause]; it never
+ * retries on its own.
+ *
  * **Mic-slot handoff & phone calls are NOT handled here** — the consumer drives [pause]/[start] for handoff
  * and call stand-down. [pause] yields the slot; [start] reacquires it, running [WakeMicConfig.beforeMicAcquire]
  * first.
@@ -94,6 +99,11 @@ class WakeMicEngine internal constructor(
     // the read and the clear is never lost.
     private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
 
+    private val losses = CaptureLossTracker(post = ::deliverOnMain) { loss ->
+        config.log("capture lost (${loss.javaClass.simpleName}): ${loss.reason}")
+        config.onCaptureLost(loss)
+    }
+
     @Volatile private var session = buildSession()
 
     private fun buildSession(): PcmCaptureSession {
@@ -101,9 +111,12 @@ class WakeMicEngine internal constructor(
         built = PcmCaptureSession(
             device = newDevice(),
             onFrame = { buf, n -> onFrame(built, buf, n) },
-            onStarted = { onStarted(built) },
-            onStopped = { if (session === built) deliverOnMain { config.onStopped() } },
-            onError = { if (session === built) deliverOnMain { config.onError(it) } },
+            onStarted = {
+                if (session === built) losses.runStarted()
+                onStarted(built)
+            },
+            onError = { if (session === built) losses.runError(it) },
+            onStopped = { if (session === built) losses.runStopped() },
             log = config.log,
             threadName = "wake-capture",
             rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
@@ -112,13 +125,14 @@ class WakeMicEngine internal constructor(
         return built
     }
 
-    fun start(): Boolean {
-        if (ignoredAfterClose("start()")) return false
+    fun start() {
+        if (ignoredAfterClose("start()")) return
         config.beforeMicAcquire()
-        return session.start() || run {
+        losses.want()
+        if (!session.start()) {
             config.log("wake capture wedged — rebuilding session and retrying")
             session = buildSession()
-            session.start()
+            if (!session.start()) losses.refused("previous capture thread still alive")
         }
     }
 
@@ -129,6 +143,7 @@ class WakeMicEngine internal constructor(
 
     fun pause() {
         if (ignoredAfterClose("pause()")) return
+        losses.unwant()
         session.stop()
         config.log("mic paused (yielded slot)")
     }
