@@ -224,7 +224,7 @@ internal class VoskWakeDetector(
 
         private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
 
-        private val PRE_READY_MAX_FRAMES = (8_000 / PcmCaptureFormat.FRAME_MS).toInt()
+        private val PRE_READY_MAX_FRAMES = 8_000 / PcmCaptureFormat.FRAME_MS
 
         fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
             VoskWakeDetector(
