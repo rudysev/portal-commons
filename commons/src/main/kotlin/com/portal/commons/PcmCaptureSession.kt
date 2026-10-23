@@ -1,5 +1,7 @@
 package com.portal.commons
 
+import java.util.concurrent.TimeUnit
+
 /**
  * Owns the microphone-capture lifecycle shared by consuming apps: a single capture thread that opens a
  * [PcmDevice], assembles [PcmCaptureFormat]-sized frames from non-blocking reads, and tears down
@@ -133,74 +135,14 @@ class PcmCaptureSession(
             onError("microphone unavailable")
             return
         }
-        val buf = ByteArray(PcmCaptureFormat.FRAME_BYTES)
-        var off = 0 // bytes assembled into the current frame so far
-        var lastFrameNs = System.nanoTime() // monotonic time a full frame was last delivered — drives the idle watchdog
+        // Built before onStarted(), so the idle clock starts when the device opened.
+        val capture = CaptureLoop()
         log("pcm capture started")
-        var readFails = 0
         try {
             // A stop() that landed while open() was in flight must not start the consumer either: on gen2 a stopped
             // session's onStarted ran Vosk's reset + warm-up past the stop join, alongside the rebuilt session.
             if (running) onStarted()
-            while (running) {
-                // Non-blocking read directly into the frame buffer at the current offset.
-                val n = device.read(buf, off, PcmCaptureFormat.FRAME_BYTES - off)
-                // Re-check running AFTER read() returns and BEFORE any callback: a stop() may have landed. A
-                // stopping session must deliver no further callback — otherwise, if the caller has already
-                // discarded this session and started a fresh one, this (old) thread's onFrame would run
-                // concurrently with the fresh thread's, racing a non-thread-safe consumer (e.g. Vosk).
-                if (!running) break
-                // Idle watchdog: if no FULL frame was delivered for idleRebuildMs, the mic is stolen/half-dead.
-                // Measuring *delivered frames* (not raw bytes read) catches a clean 0, a sub-frame trickle (n>0
-                // that never completes a frame), and partials interleaved with sub-threshold errors — none of
-                // which the <0 rebuild sees. Monotonic clock so a wall-clock jump can't false-fire/disable it.
-                if (idleRebuildMs != null && System.nanoTime() - lastFrameNs >= idleRebuildMs * 1_000_000) {
-                    if (!running) break // a stop() landed — don't reopen a device we're about to tear down
-                    if (!rebuildDevice("no frame for ${idleRebuildMs}ms")) {
-                        onError("microphone unavailable on rebuild")
-                        break
-                    }
-                    off = 0
-                    readFails = 0
-                    lastFrameNs = System.nanoTime()
-                    continue
-                }
-                when {
-                    n > 0 -> {
-                        readFails = 0
-                        off += n
-                        if (off == PcmCaptureFormat.FRAME_BYTES) { // length is capped at the remaining bytes, so off lands exactly here
-                            onFrame(buf, PcmCaptureFormat.FRAME_BYTES)
-                            off = 0
-                            lastFrameNs = System.nanoTime()
-                        }
-                        // else: partial frame — loop again immediately to drain whatever else is buffered
-                    }
-
-                    n == 0 -> {
-                        // No data right now — NORMAL for a non-blocking read, not a failure (does not touch
-                        // readFails). Poll again after a short sleep; re-check running so a stop() landing here
-                        // isn't delayed a full poll interval. Sustained no-data is handled by the idle watchdog above.
-                        if (pollMs > 0 && running) Thread.sleep(pollMs)
-                    }
-
-                    else -> { // n < 0: a real device error — discard any partial frame to avoid splicing audio
-                        off = 0
-                        onReadError(++readFails)
-                        if (rebuildAfterReadFailures != null && readFails >= rebuildAfterReadFailures) {
-                            if (!running) break // a stop() landed — don't reopen a device we're about to tear down
-                            if (!rebuildDevice("read failing")) {
-                                onError("microphone unavailable on rebuild")
-                                break
-                            }
-                            readFails = 0
-                            lastFrameNs = System.nanoTime() // fresh device — restart the idle clock
-                        } else if (readErrorBackoffMs > 0 && running) {
-                            Thread.sleep(readErrorBackoffMs)
-                        }
-                    }
-                }
-            }
+            capture.run()
         } catch (e: Throwable) {
             log("pcm capture EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
         } finally {
@@ -213,6 +155,93 @@ class PcmCaptureSession(
             }
             log("pcm capture stopped")
             onStopped()
+        }
+    }
+
+    /**
+     * The read loop of one capture, with its frame-assembly and watchdog state. Created and run by [loop] on the
+     * capture thread only, so its fields are confined to that thread.
+     */
+    private inner class CaptureLoop {
+        private val buf = ByteArray(PcmCaptureFormat.FRAME_BYTES)
+        private var off = 0 // bytes assembled into the current frame so far
+        private var lastFrameNs = System.nanoTime() // monotonic time a full frame was last delivered — drives the idle watchdog
+        private var readFails = 0
+
+        /** Read until [stop] or a failed rebuild. */
+        fun run() {
+            var keepReading = true
+            while (keepReading && running) keepReading = step()
+        }
+
+        /** One non-blocking read and its handling. False ends the capture. */
+        private fun step(): Boolean {
+            // Non-blocking read directly into the frame buffer at the current offset.
+            val n = device.read(buf, off, PcmCaptureFormat.FRAME_BYTES - off)
+            // Re-check running AFTER read() returns and BEFORE any callback: a stop() may have landed. A
+            // stopping session must deliver no further callback — otherwise, if the caller has already
+            // discarded this session and started a fresh one, this (old) thread's onFrame would run
+            // concurrently with the fresh thread's, racing a non-thread-safe consumer (e.g. Vosk).
+            return running &&
+                when {
+                    // Idle watchdog: if no FULL frame was delivered for idleRebuildMs, the mic is stolen/half-dead.
+                    // Measuring *delivered frames* (not raw bytes read) catches a clean 0, a sub-frame trickle (n>0
+                    // that never completes a frame), and partials interleaved with sub-threshold errors — none of
+                    // which the <0 rebuild sees. Monotonic clock so a wall-clock jump can't false-fire/disable it.
+                    // The read's result is dropped: the rebuild discards any partial frame anyway.
+                    idleRebuildMs != null && System.nanoTime() - lastFrameNs >= TimeUnit.MILLISECONDS.toNanos(idleRebuildMs) ->
+                        rebuild("no frame for ${idleRebuildMs}ms")
+
+                    n > 0 -> {
+                        onData(n)
+                        true
+                    }
+
+                    n == 0 -> {
+                        // No data right now — NORMAL for a non-blocking read, not a failure (does not touch
+                        // readFails). Poll again after a short sleep; re-check running so a stop() landing here
+                        // isn't delayed a full poll interval. Sustained no-data is handled by the idle watchdog above.
+                        if (pollMs > 0 && running) Thread.sleep(pollMs)
+                        true
+                    }
+
+                    else -> onDeviceError()
+                }
+        }
+
+        private fun onData(n: Int) {
+            readFails = 0
+            off += n
+            if (off == PcmCaptureFormat.FRAME_BYTES) { // length is capped at the remaining bytes, so off lands exactly here
+                onFrame(buf, PcmCaptureFormat.FRAME_BYTES)
+                off = 0
+                lastFrameNs = System.nanoTime()
+            }
+            // else: partial frame — loop again immediately to drain whatever else is buffered
+        }
+
+        /** n < 0: a real device error. False ends the capture (a failed rebuild). */
+        private fun onDeviceError(): Boolean {
+            off = 0 // discard any partial frame to avoid splicing audio
+            onReadError(++readFails)
+            val rebuildAfter = rebuildAfterReadFailures
+            if (rebuildAfter != null && readFails >= rebuildAfter) return rebuild("read failing")
+            if (readErrorBackoffMs > 0 && running) Thread.sleep(readErrorBackoffMs)
+            return true
+        }
+
+        /** Rebuild the device (see [rebuildDevice]) and restart the frame and idle state. False ends the capture. */
+        private fun rebuild(reason: String): Boolean {
+            if (!running) return false // a stop() landed — don't reopen a device we're about to tear down
+            val reopened = rebuildDevice(reason)
+            if (reopened) {
+                off = 0
+                readFails = 0
+                lastFrameNs = System.nanoTime() // fresh device — restart the idle clock
+            } else {
+                onError("microphone unavailable on rebuild")
+            }
+            return reopened
         }
     }
 
