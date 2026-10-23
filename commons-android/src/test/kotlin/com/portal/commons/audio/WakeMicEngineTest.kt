@@ -4,7 +4,6 @@ import android.content.ContextWrapper
 import com.portal.commons.PcmDevice
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
@@ -142,21 +141,6 @@ class WakeMicEngineTest {
 
         assertEquals(listOf(0L), first.accepts)
         assertEquals(emptyList<Long>(), second.accepts)
-    }
-
-    @Test fun detectorsCanStillQueryTheCooldownThroughTheHost() {
-        newEngine().start()
-        val cooldown = detector.host.handoffCooldown
-        assertFalse(cooldown.isAnyCoolingDown())
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
-        nowMs = 500L
-
-        assertTrue(cooldown.isCoolingDown("jarvis"))
-        assertFalse(cooldown.isCoolingDown("alexa"))
-        assertTrue(cooldown.isAnyCoolingDown())
-        nowMs = 1_500L
-        assertFalse(cooldown.isAnyCoolingDown())
     }
 
     @Test fun aRepeatOfTheSameWakeIdInsideTheCooldownNeverReachesTheConsumer() {

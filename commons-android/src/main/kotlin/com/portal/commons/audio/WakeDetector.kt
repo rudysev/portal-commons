@@ -39,7 +39,9 @@ interface WakeDetector {
      * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]). Report a match via [Host.events].
      * Called on the capture thread. An implementation that isn't ready yet should buffer or drop internally
      * — the engine delivers every frame except those inside the handoff cooldown, which no detector hears
-     * (even one still loading).
+     * (even one still loading). The cooldown is the engine's alone and is not visible here: a detector that
+     * replays buffered frames in one call must stop at its own first wake, since everything after it falls
+     * inside the cooldown.
      */
     fun accept(buf: ByteArray, n: Int)
 
@@ -57,7 +59,6 @@ interface WakeDetector {
         val context: Context
         val wakeWords: List<WakeWord>
         val events: Events
-        val handoffCooldown: WakeHandoffCooldown
     }
 
     /**

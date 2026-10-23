@@ -58,13 +58,6 @@ class WakeMicEngine internal constructor(
         override val context: Context = context
         override val wakeWords: List<WakeWord> = config.wakeWords
         override val events: WakeDetector.Events = detectorEvents
-
-        // Redundant now the engine gates frames itself; kept so the Vosk detector works unchanged.
-        override val handoffCooldown: WakeHandoffCooldown = object : WakeHandoffCooldown {
-            override fun isCoolingDown(wakeId: String) = fireCooldown.isCoolingDown(wakeId, clock())
-
-            override fun isAnyCoolingDown() = fireCooldown.isAnyCoolingDown(clock())
-        }
     }
 
     private val detectors: List<WakeDetector> = config.detectors.map { it.create(detectorHost) }

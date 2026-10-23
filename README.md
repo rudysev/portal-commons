@@ -27,9 +27,9 @@ All package `com.portal.commons`.
 | Class | Purpose |
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
-| `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s. Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
-| `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). |
-| `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay, idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
+| `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (after a wake, no detector is fed frames and a repeat of the same wake id is dropped; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). |
+| `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). Detectors never see the handoff cooldown: the engine just withholds frames. |
+| `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
 
 ## Build / test (standalone)
 

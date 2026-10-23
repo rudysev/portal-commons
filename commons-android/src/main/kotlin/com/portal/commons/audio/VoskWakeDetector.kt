@@ -22,15 +22,16 @@ import java.util.concurrent.atomic.AtomicReference
  * **On (re)start** ([start]) the decoder is reset — which re-warms it — so the first frame after a resume
  * isn't garbled.
  *
- * Post-fire handoff cooldown is enforced by [WakeMicEngine] via [WakeHandoffCooldown]. While any phrase is
- * cooling down, [accept] skips inference and idle-reset. A match reports via [WakeDetector.Events.onWake];
- * diagnostics carry the exact `near-miss …` / `flushed final …` strings the mic owner used to log.
+ * The **handoff cooldown** is [WakeMicEngine]'s: it simply stops feeding frames, so this detector never sees
+ * it. The one place it would otherwise leak in is replay — the pre-ready buffer is fed in one go, so replay
+ * stops at the first wake it emits, and the frame that triggered the replay is dropped with the rest.
+ * A match reports via [WakeDetector.Events.onWake]; diagnostics carry the exact `near-miss …` /
+ * `flushed final …` strings the mic owner used to log.
  */
 internal class VoskWakeDetector(
     loader: VoskModelLoader,
     initialWakeWords: List<WakeWord>,
     private val events: WakeDetector.Events,
-    private val handoffCooldown: WakeHandoffCooldown,
     // Monotonic milliseconds, for the idle-reset clock (a wall-clock jump could force a mid-decode reset).
     // Injected so tests drive time.
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
@@ -85,11 +86,13 @@ internal class VoskWakeDetector(
     }
 
     override fun accept(buf: ByteArray, n: Int) {
-        if (decoder == null && !adoptDeliveredModel()) {
-            preReadyBuffer.add(buf, n)
-            return
+        if (decoder == null) {
+            if (!adoptDeliveredModel()) {
+                preReadyBuffer.add(buf, n)
+                return
+            }
+            if (replayPreReadyFrames()) return // this frame came after the replayed wake: inside the handoff cooldown
         }
-        if (handoffCooldown.isAnyCoolingDown()) return
         maybeIdleReset()
         decode(buf, n)
     }
@@ -127,8 +130,8 @@ internal class VoskWakeDetector(
     }
 
     /**
-     * Take a model the loader delivered: build + warm the first decoder, signal readiness, replay the
-     * pre-ready buffer. False when there is no model yet, or its first decoder build failed (unavailable).
+     * Take a model the loader delivered: build + warm the first decoder, signal readiness. False when there is
+     * no model yet, or its first decoder build failed (unavailable).
      */
     private fun adoptDeliveredModel(): Boolean {
         val m = delivered.getAndSet(null) ?: return false
@@ -140,18 +143,18 @@ internal class VoskWakeDetector(
         }
         decoder = dec
         events.onReady(ID)
-        replayPreReadyFrames()
         return true
     }
 
-    private fun replayPreReadyFrames() {
+    /** Decode the pre-ready buffer in order, stopping at the first wake. True if a wake fired. */
+    private fun replayPreReadyFrames(): Boolean {
         val buffered = preReadyBuffer.drain()
-        if (buffered.isEmpty()) return
+        if (buffered.isEmpty()) return false
         events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
         for (frame in buffered) {
-            if (handoffCooldown.isAnyCoolingDown()) break // a replayed wake armed the cooldown: stop there
-            decode(frame, frame.size)
+            if (decode(frame, frame.size)) return true
         }
+        return false
     }
 
     private fun maybeIdleReset() {
@@ -175,17 +178,19 @@ internal class VoskWakeDetector(
      * Feed one frame. When it finalizes a decode (Vosk endpointed) the lattice was just flushed; report a
      * match, a near-miss (a keyword decoded but a gate rejected it), or a non-empty keyword-free decode — a
      * leading "hey" swallowed into a finalization right before the keyword decodes alone surfaces there (the
-     * dropped-lead suspect). The decode is carried so the log shows *what Vosk heard*.
+     * dropped-lead suspect). The decode is carried so the log shows *what Vosk heard*. True if a wake fired.
      */
-    private fun decode(buf: ByteArray, n: Int) {
-        val dec = decoder ?: return
-        if (!dec.acceptFrame(buf, n)) return
+    private fun decode(buf: ByteArray, n: Int): Boolean {
+        val dec = decoder ?: return false
+        if (!dec.acceptFrame(buf, n)) return false
         idleReset.noteFlushed(clock())
         val words = parseResult(dec.finalResult())
         val transcript = render(words)
         when (val o = WakeMatcher.evaluate(words, wakeWords)) {
-            is WakeMatcher.Outcome.Match ->
+            is WakeMatcher.Outcome.Match -> {
                 events.onWake(WakeEvent(ID, o.id, transcript))
+                return true
+            }
 
             is WakeMatcher.Outcome.NearMiss ->
                 events.onDiagnostic(ID, "near-miss [$transcript] rejected: ${o.reason}")
@@ -193,6 +198,7 @@ internal class VoskWakeDetector(
             WakeMatcher.Outcome.None ->
                 if (transcript.isNotEmpty()) events.onDiagnostic(ID, "flushed final [$transcript]")
         }
+        return false
     }
 
     /**
@@ -249,7 +255,6 @@ internal class VoskWakeDetector(
                 LibVoskModelLoader(host.context, modelDir),
                 host.wakeWords,
                 host.events,
-                host.handoffCooldown,
             )
         }
 
