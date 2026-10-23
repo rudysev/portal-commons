@@ -101,7 +101,7 @@ class WakeMicEngine internal constructor(
         override val events: WakeDetector.Events = detectorEvents
     }
 
-    private val detectors = SerializedDetectors(config.detectors.map { it.create(detectorHost) })
+    private val detectors = SerializedDetectors(config.detectors.map { it.create(detectorHost) }, config.log)
 
     // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
     // the read and the clear is never lost.
@@ -185,7 +185,7 @@ class WakeMicEngine internal constructor(
         val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_DEADLINE_MS)
         val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
         session.stop(timeoutMs = CLOSE_DEADLINE_MS)
-        detectors.close(timeoutMs = leftMs(), log = config.log)
+        detectors.close(timeoutMs = leftMs())
         wakeGate.close(timeoutMs = leftMs())
     }
 
