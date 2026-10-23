@@ -23,12 +23,7 @@ package com.portal.commons.audio
  *   above it the bypass is off and the keyword must clear this floor. A higher value mainly trades a bit
  *   of recall for a stricter floor; precision comes from the required [lead], not this number.
  */
-data class WakeWord(
-    val id: String,
-    val keyword: String,
-    val lead: String?,
-    val minConf: Double,
-) {
+data class WakeWord(val id: String, val keyword: String, val lead: String?, val minConf: Double) {
     /** The full spoken phrase / grammar entry, derived from [lead] + [keyword] (e.g. "hey jarvis"). */
     val phrase: String get() = lead?.let { "$it $keyword" } ?: keyword
 
@@ -37,7 +32,8 @@ data class WakeWord(
 
         /** Split a phrase into its lowercase, whitespace-separated words — the one shared tokenization rule
          *  ([fromPhrase] and the registry's word-count both use it, so they can't drift). */
-        fun tokenize(phrase: String): List<String> = phrase.trim().lowercase().split(WHITESPACE).filter { it.isNotEmpty() }
+        fun tokenize(phrase: String): List<String> =
+            phrase.trim().lowercase().split(WHITESPACE).filter { it.isNotEmpty() }
 
         /**
          * Derive a [WakeWord] from a full spoken [phrase] — the single place phrase→(keyword, lead) lives,

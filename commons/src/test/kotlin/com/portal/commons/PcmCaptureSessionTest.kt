@@ -22,16 +22,15 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class PcmCaptureSessionTest {
 
-    private fun await(latch: CountDownLatch) = assertTrue("timed out waiting for latch", latch.await(3, TimeUnit.SECONDS))
+    private fun await(latch: CountDownLatch) =
+        assertTrue("timed out waiting for latch", latch.await(3, TimeUnit.SECONDS))
 
     /**
      * Non-blocking fake: serves [framesToServe] frames in [bytesPerRead]-byte chunks (assembled by the
      * session into full [PcmCaptureFormat.FRAME_BYTES] frames), returns `0` (idle) once exhausted, and `-1`
      * (error) while [failReads]. Never parks.
      */
-    private class FakeDevice(
-        private val openResults: ArrayDeque<Boolean> = ArrayDeque(),
-    ) : PcmDevice {
+    private class FakeDevice(private val openResults: ArrayDeque<Boolean> = ArrayDeque()) : PcmDevice {
         val openCount = AtomicInteger()
         val stopCount = AtomicInteger()
         val releaseCount = AtomicInteger()

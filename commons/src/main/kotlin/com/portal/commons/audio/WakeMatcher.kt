@@ -136,7 +136,8 @@ object WakeMatcher {
      * Returns the id of the first [wakeWords] entry genuinely spoken in [words], or null. Deterministic
      * and side-effect-free. Thin wrapper over [evaluate] — kept as the load-bearing accuracy entry point.
      */
-    fun match(words: List<RecWord>, wakeWords: List<WakeWord>): String? = (evaluate(words, wakeWords) as? Outcome.Match)?.id
+    fun match(words: List<RecWord>, wakeWords: List<WakeWord>): String? =
+        (evaluate(words, wakeWords) as? Outcome.Match)?.id
 
     /**
      * Like [match] but also reports *why* a decode that carried a wake keyword was rejected, so the mic owner
@@ -222,7 +223,8 @@ object WakeMatcher {
     }
 
     /** The rejection reason for a [keyword] decoded under [w]'s confidence floor. */
-    private fun underFloor(keyword: RecWord, w: WakeWord): String = "'${w.keyword}' ${conf(keyword.conf)} under ${w.minConf} floor"
+    private fun underFloor(keyword: RecWord, w: WakeWord): String =
+        "'${w.keyword}' ${conf(keyword.conf)} under ${w.minConf} floor"
 
     /** Render a confidence for a log reason (`conf%`, or `?` when the recognizer gave no score). */
     private fun conf(c: Double): String = if (c < 0) "?" else "${(c * PERCENT).toInt()}%"

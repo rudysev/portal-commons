@@ -20,7 +20,9 @@ class VoskWakeDetectorRaceTest {
 
     private fun detector() = VoskWakeDetector(loader, listOf(JARVIS), events, clock = { 0L })
 
-    /** Deliver the model on a `wake-model-load` thread; [during] runs while that delivery is (or would be) mid-build. */
+    /**
+     * Deliver the model on a `wake-model-load` thread; [during] runs while that delivery is (or would be) mid-build.
+     */
     private fun loadRacing(during: () -> Unit) {
         val gate = Gate()
         model.firstBuildGate = gate

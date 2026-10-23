@@ -149,7 +149,10 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
     }
 }
 
-/** Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, `wake:<id> [<transcript>]`, or the diagnostic. */
+/**
+ * Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, `wake:<id> [<transcript>]`, or the
+ * diagnostic.
+ */
 internal class RecordingEvents : WakeDetector.Events {
     val lines = CopyOnWriteArrayList<String>()
 

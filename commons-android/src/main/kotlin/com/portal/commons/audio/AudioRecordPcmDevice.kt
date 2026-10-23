@@ -50,7 +50,8 @@ class AudioRecordPcmDevice : PcmDevice {
 
     // Non-blocking: returns bytes read, 0 if nothing buffered, or a negative value AudioRecord error code
     // (ERROR/ERROR_BAD_VALUE/ERROR_INVALID_OPERATION/ERROR_DEAD_OBJECT) - maps 1-1 onto PcmDevice's read().
-    override fun read(buf: ByteArray, offset: Int, length: Int): Int = record?.read(buf, offset, length, AudioRecord.READ_NON_BLOCKING) ?: -1
+    override fun read(buf: ByteArray, offset: Int, length: Int): Int =
+        record?.read(buf, offset, length, AudioRecord.READ_NON_BLOCKING) ?: -1
 
     override fun stop() {
         runCatching { record?.stop() }
@@ -83,4 +84,5 @@ class AudioRecordPcmDevice : PcmDevice {
  * `RECORDSTATE_*` values are inlined compile-time constants). A device is ready only when it both
  * initialized and actually entered the recording state after `startRecording()`.
  */
-internal fun captureReady(recordState: Int, recordingState: Int): Boolean = recordState == AudioRecord.STATE_INITIALIZED && recordingState == AudioRecord.RECORDSTATE_RECORDING
+internal fun captureReady(recordState: Int, recordingState: Int): Boolean =
+    recordState == AudioRecord.STATE_INITIALIZED && recordingState == AudioRecord.RECORDSTATE_RECORDING

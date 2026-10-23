@@ -26,10 +26,8 @@ class VoskWakeDetectorTest {
 
     @Volatile private var now = 0L
 
-    private fun detector(
-        words: List<WakeWord> = listOf(JARVIS),
-        loader: VoskModelLoader = this.loader,
-    ) = VoskWakeDetector(loader, words, events, clock = { now })
+    private fun detector(words: List<WakeWord> = listOf(JARVIS), loader: VoskModelLoader = this.loader) =
+        VoskWakeDetector(loader, words, events, clock = { now })
 
     /** A detector whose model has loaded and which has been started at t=0, with the event log cleared. */
     private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): VoskWakeDetector = detector(words).also {

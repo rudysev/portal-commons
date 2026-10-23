@@ -254,12 +254,18 @@ class WakeMatcherTest {
     @Test fun doubledHey_matches() {
         // `[hey hey hey jarvis]` for one spoken "hey jarvis" (Vosk split the lead) → folds to a clean
         // 2-word phrase → fires. Without the fix this was rejected as "phrase too long" (missed on-device).
-        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.72, "hey" to 0.98, "hey" to 1.0, "jarvis" to 1.0), words))
+        assertEquals(
+            "jarvis",
+            WakeMatcher.match(rec("hey" to 0.72, "hey" to 0.98, "hey" to 1.0, "jarvis" to 1.0), words),
+        )
     }
 
     @Test fun doubledKeyword_matches() {
         // `[hey jarvis jarvis jarvis]` folds the repeated keyword → clean phrase → fires.
-        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.99, "jarvis" to 0.9, "jarvis" to 1.0, "jarvis" to 0.95), words))
+        assertEquals(
+            "jarvis",
+            WakeMatcher.match(rec("hey" to 0.99, "jarvis" to 0.9, "jarvis" to 1.0, "jarvis" to 0.95), words),
+        )
     }
 
     @Test fun repeatedLead_doesNotDefeatContaminationGate() {

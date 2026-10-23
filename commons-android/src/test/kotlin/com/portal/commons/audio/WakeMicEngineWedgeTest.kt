@@ -16,8 +16,12 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class WakeMicEngineWedgeTest {
 
-    /** Records any moment two threads are inside it. Its first [start] / [accept] takes [firstStartMs] / [firstAcceptMs]. */
-    private class OverlapDetector(private val firstStartMs: Long = 0, private val firstAcceptMs: Long = 0) : WakeDetector {
+    /**
+     * Records any moment two threads are inside it. Its first [start] / [accept] takes [firstStartMs] /
+     * [firstAcceptMs].
+     */
+    private class OverlapDetector(private val firstStartMs: Long = 0, private val firstAcceptMs: Long = 0) :
+        WakeDetector {
         override val id = "fake"
         private val inside = AtomicInteger()
         private val starts = AtomicInteger()
@@ -35,7 +39,13 @@ class WakeMicEngineWedgeTest {
 
         override fun start() = enter("start") { if (starts.getAndIncrement() == 0) Thread.sleep(firstStartMs) }
 
-        override fun accept(buf: ByteArray, n: Int) = enter("accept") { if (accepts.getAndIncrement() == 0) Thread.sleep(firstAcceptMs) }
+        override fun accept(buf: ByteArray, n: Int) = enter("accept") {
+            if (accepts.getAndIncrement() ==
+                0
+            ) {
+                Thread.sleep(firstAcceptMs)
+            }
+        }
 
         override fun updateWakeWords(words: List<WakeWord>) = enter("updateWakeWords") {}
 
@@ -85,7 +95,8 @@ class WakeMicEngineWedgeTest {
 
     @Test(timeout = 10_000)
     fun wedgedInStartRebuiltSessionNeverRunsTheDetectorAlongside() {
-        val detector = OverlapDetector(firstStartMs = 600) // Vosk's reset + silence warm-up, longer than the 400 ms join
+        // Vosk's reset + silence warm-up, longer than the 400 ms join
+        val detector = OverlapDetector(firstStartMs = 600)
         assertEquals(wedged, replayWedge(detector))
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }

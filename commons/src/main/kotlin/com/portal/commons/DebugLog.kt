@@ -43,7 +43,10 @@ object DebugLog {
 
     @Volatile private var worker: Thread? = null
 
-    /** Active log size (bytes) before rotating to `<name>.1`. Tests may lower this; production uses [DEFAULT_MAX_FILE_BYTES]. */
+    /**
+     * Active log size (bytes) before rotating to `<name>.1`. Tests may lower this; production uses
+     * [DEFAULT_MAX_FILE_BYTES].
+     */
     @Volatile
     internal var maxFileBytes: Long = DEFAULT_MAX_FILE_BYTES
         set(value) {
@@ -156,7 +159,8 @@ object DebugLog {
         }
     }
 
-    private fun openWriter(f: File): BufferedWriter = BufferedWriter(OutputStreamWriter(FileOutputStream(f, true))) // append = true: never truncate on (re)open
+    private fun openWriter(f: File): BufferedWriter =
+        BufferedWriter(OutputStreamWriter(FileOutputStream(f, true))) // append = true: never truncate on (re)open
 
     /**
      * Close [w], rename [f] to `<name>.1`, and reopen a fresh [f]. Returns the new writer and its byte count,
@@ -176,5 +180,7 @@ object DebugLog {
 
     const val DEFAULT_MAX_FILE_BYTES = 512L * 1024L
     private const val MAX_QUEUE = 1024
-    private const val CONTROL_HEADROOM = 16 // queue slots kept free for control commands so a log flood can't starve them
+
+    // queue slots kept free for control commands so a log flood can't starve them
+    private const val CONTROL_HEADROOM = 16
 }

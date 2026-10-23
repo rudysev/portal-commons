@@ -173,7 +173,9 @@ class PcmCaptureSession(
     private inner class CaptureLoop {
         private val buf = ByteArray(PcmCaptureFormat.FRAME_BYTES)
         private var off = 0 // bytes assembled into the current frame so far
-        private var lastFrameNs = System.nanoTime() // monotonic time a full frame was last delivered — drives the idle watchdog
+
+        // monotonic time a full frame was last delivered — drives the idle watchdog
+        private var lastFrameNs = System.nanoTime()
         private var readFails = 0
 
         /** Read until [stop] or a failed rebuild. */
@@ -197,7 +199,8 @@ class PcmCaptureSession(
                     // that never completes a frame), and partials interleaved with sub-threshold errors — none of
                     // which the <0 rebuild sees. Monotonic clock so a wall-clock jump can't false-fire/disable it.
                     // The read's result is dropped: the rebuild discards any partial frame anyway.
-                    idleRebuildMs != null && System.nanoTime() - lastFrameNs >= TimeUnit.MILLISECONDS.toNanos(idleRebuildMs) ->
+                    idleRebuildMs != null &&
+                        System.nanoTime() - lastFrameNs >= TimeUnit.MILLISECONDS.toNanos(idleRebuildMs) ->
                         rebuild("no frame for ${idleRebuildMs}ms")
 
                     n > 0 -> {
@@ -220,7 +223,8 @@ class PcmCaptureSession(
         private fun onData(n: Int) {
             readFails = 0
             off += n
-            if (off == PcmCaptureFormat.FRAME_BYTES) { // length is capped at the remaining bytes, so off lands exactly here
+            // length is capped at the remaining bytes, so off lands exactly here
+            if (off == PcmCaptureFormat.FRAME_BYTES) {
                 onFrame(buf, PcmCaptureFormat.FRAME_BYTES)
                 off = 0
                 lastFrameNs = System.nanoTime()

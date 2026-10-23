@@ -51,5 +51,6 @@ object PcmLevel {
     }
 
     /** [rms] mapped to a 0..1 indicator level (full scale = [FULL_SCALE]). */
-    fun normalized(buf: ByteArray, length: Int = buf.size): Float = (rms(buf, length) / FULL_SCALE).toFloat().coerceIn(0f, 1f)
+    fun normalized(buf: ByteArray, length: Int = buf.size): Float =
+        (rms(buf, length) / FULL_SCALE).toFloat().coerceIn(0f, 1f)
 }
