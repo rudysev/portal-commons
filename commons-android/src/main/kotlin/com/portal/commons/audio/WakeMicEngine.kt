@@ -135,12 +135,16 @@ class WakeMicEngine internal constructor(
     /**
      * Wants capture and (re)acquires the mic, running [WakeMicConfig.beforeMicAcquire] first. Returns nothing: a mic
      * that can't be opened, or a start refused because a previous capture thread is wedged, arrives later as a posted
-     * [CaptureLoss.NotGranted]. A logged no-op after [close].
+     * [CaptureLoss.NotGranted]. While capture is still wanted and no loss has been raised it keeps the current capture
+     * (a loss that capture raises later is still reported). A logged no-op after [close].
      */
     fun start() {
         if (ignoredAfterClose("start()")) return
         config.beforeMicAcquire()
-        losses.want()
+        if (!losses.want()) {
+            config.log("start() while capture is already wanted — keeping the current capture")
+            return
+        }
         if (!session.start()) {
             config.log("wake capture wedged — rebuilding session and retrying")
             session = buildSession()
