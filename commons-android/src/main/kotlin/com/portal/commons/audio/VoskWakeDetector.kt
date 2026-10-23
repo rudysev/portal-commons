@@ -23,9 +23,10 @@ import java.util.concurrent.atomic.AtomicReference
  * **On (re)start** ([start]) the decoder is reset — which re-warms it — so the first frame after a resume
  * isn't garbled.
  *
- * The **handoff cooldown** is [WakeMicEngine]'s: it simply stops feeding frames, so this detector never sees
- * it. The one place it would otherwise leak in is replay — the pre-ready buffer is fed in one go, so replay
- * stops at the first wake it emits, and the frame that triggered the replay is dropped with the rest.
+ * The **handoff cooldown** is [WakeMicEngine]'s single window after any wake: it simply stops feeding frames,
+ * so this detector never sees it. The one place it would otherwise leak in is replay — the pre-ready buffer is
+ * fed in one go, so replay stops at the first wake it emits, and the frame that triggered the replay is dropped
+ * with the rest.
  * A match reports via [WakeDetector.Events.onWake]; diagnostics carry the exact `near-miss …` /
  * `flushed final …` strings the mic owner used to log.
  */

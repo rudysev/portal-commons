@@ -19,7 +19,7 @@ A backstop reset of the decoder that bounds the lattice when no natural endpoint
 _Avoid_: periodic reset, lattice flush
 
 **Handoff cooldown**:
-The window after a wake fires during which the engine feeds no frames to any detector and drops a repeat of the same wake id, covering the gap until capture pauses for the handoff.
+The single window after any wake fires during which the engine feeds no frames to any detector and drops every further wake, whatever its wake id, covering the gap until capture pauses for the handoff.
 _Avoid_: fire cooldown, de-dupe window
 
 **Pre-ready buffer**:
