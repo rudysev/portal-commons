@@ -17,8 +17,9 @@ import java.util.concurrent.TimeUnit
  * poll interval and exits on its own; [stop] sets the flag and joins with a bounded [joinTimeoutMs]. On the
  * normal path the loop's `finally` releases the device, so the device is touched only on the capture thread.
  * If the thread doesn't exit in time (it overran the join inside a callback, or a native call hung), [stop]
- * force-releases the device as a last resort so the mic slot can't stay held, and keeps the thread reference
- * set so a later [start] refuses (returns false) rather than running two readers on the single mic slot.
+ * force-releases the device as a last resort (on a helper thread, so [stop] stays bounded) so the mic slot can't
+ * stay held, and keeps the thread reference set so a later [start] refuses (returns false) rather than running two
+ * readers on the single mic slot.
  *
  * **One session = one capture.** This object is deliberately *not* self-recovering: in the rare case a
  * native call hangs so [stop]'s join times out, [start] just refuses (false). Recovering — so capture resumes —
@@ -83,14 +84,19 @@ class PcmCaptureSession(
     }
 
     /**
-     * Stop and free the mic, guaranteed not to hang. Sets `running = false` and joins the capture thread with
-     * a bounded [joinTimeoutMs]; the loop observes the flag within one poll and its `finally` releases the
-     * device — so on the normal path the device is touched only on the capture thread. If the thread is still
-     * alive after the timeout (it overran the join inside a callback, or a native open/stop/release hung),
-     * this force-releases the device as a last resort so the mic slot can't stay held, and keeps the thread
-     * reference set so a later [start] refuses rather than running two readers on the one slot. Safe from any
-     * thread; a self-[stop] from the capture thread just signals and returns (the loop's own teardown releases
-     * and clears the thread reference). [timeoutMs] lets a caller with its own deadline join for less.
+     * Stop and free the mic, guaranteed not to hang: returns within [timeoutMs]. Sets `running = false` and joins the
+     * capture thread; the loop observes the flag within one poll and its `finally` releases the device — so on the
+     * normal path the device is touched only on the capture thread. If the thread is still alive near the end of
+     * [timeoutMs] (it overran the join inside a callback, or a native open/stop/release hung), this force-releases the
+     * device as a last resort so the mic slot can't stay held, and keeps the thread reference set so a later [start]
+     * refuses rather than running two readers on the one slot. Safe from any thread; a self-[stop] from the capture
+     * thread just signals and returns (the loop's own teardown releases and clears the thread reference).
+     *
+     * **Trade-off.** The force-release runs on a short-lived helper thread, and the join leaves it the last
+     * [FORCE_RELEASE_GRACE_MS] of [timeoutMs] (at most half). So the mic slot is free when this returns whenever the
+     * release itself is quick; if the native release hangs too, this still returns on time and the slot frees only
+     * when that release returns, on the helper thread. A bounded stop is worth more than a held caller: on the main
+     * thread an unbounded one is an ANR.
      */
     fun stop(timeoutMs: Long = joinTimeoutMs) {
         val t = synchronized(lock) {
@@ -102,16 +108,30 @@ class PcmCaptureSession(
             // loop's finally clears it on the controlled path.
             return
         }
-        runCatching { t.join(timeoutMs.coerceAtLeast(1)) }
+        val totalMs = timeoutMs.coerceAtLeast(1)
+        val graceMs = minOf(FORCE_RELEASE_GRACE_MS, totalMs / 2)
+        runCatching { t.join(totalMs - graceMs) }
         if (t.isAlive) {
             // The capture thread didn't exit in time — it overran the join inside a callback, or a native
             // open/stop/release hung. Force-release the device so the mic slot can't stay held, and keep
             // `thread = t` so start() refuses while it's alive (never two readers on the one slot).
             log("pcm stop timeout — force-releasing device; capture thread still alive")
-            runCatching { device.stop() }
-            runCatching { device.release() }
+            forceRelease(graceMs)
         }
         // if it exited, the loop's finally already cleared `thread` under the lock
+    }
+
+    // On a helper thread, so a release that hangs in native code holds that thread, not the caller.
+    private fun forceRelease(waitMs: Long) {
+        val helper = Thread({
+            runCatching { device.stop() }
+            runCatching { device.release() }
+        }, "$threadName-release").apply {
+            isDaemon = true
+            start()
+        }
+        runCatching { helper.join(waitMs.coerceAtLeast(1)) }
+        if (helper.isAlive) log("pcm force-release still running — the mic slot frees when it returns")
     }
 
     /**
@@ -260,6 +280,9 @@ class PcmCaptureSession(
     companion object {
         const val DEFAULT_JOIN_TIMEOUT_MS = 400L
         const val DEFAULT_READ_ERROR_BACKOFF_MS = 20L
+
+        /** The part of [stop]'s timeout left for a force-release once the join gives up (at most half of it). */
+        const val FORCE_RELEASE_GRACE_MS = 50L
 
         // Sleep between non-blocking reads when no data is buffered yet. At 32 B/ms this wakes ~50×/s
         // (negligible CPU), drains ≤ ~640 B per idle wake, adds ≤ this many ms to a 100 ms frame, and leaves

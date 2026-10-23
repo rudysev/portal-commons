@@ -305,6 +305,31 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
+    fun stopStaysWithinItsTimeoutWhenTheForceReleaseHangsToo() {
+        val releaseEntered = CountDownLatch(1)
+        val releaseHung = CountDownLatch(1)
+        val capture = BlockingFake()
+        val fake = object : PcmDevice by capture {
+            override fun release() {
+                releaseEntered.countDown()
+                releaseHung.await() // a native release that hangs as well
+            }
+        }
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, pollMs = 0)
+
+        session.start()
+        await(capture.parked)
+        val startNs = System.nanoTime()
+        session.stop(timeoutMs = 200)
+        val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
+
+        assertTrue("stop() took $tookMs ms", tookMs < 300)
+        await(releaseEntered) // the force-release was still attempted
+        releaseHung.countDown()
+        capture.unpark()
+    }
+
+    @Test(timeout = 10_000)
     fun idleWatchdogRebuildsWhenLiveMicReturnsNoData() {
         // A live mic that returns 0 (no data) for idleRebuildMs — a stolen/half-dead slot that never errors —
         // must be recovered by a device rebuild, WITHOUT being counted as a read error.

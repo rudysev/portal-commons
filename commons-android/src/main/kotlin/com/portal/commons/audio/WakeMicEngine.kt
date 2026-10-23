@@ -176,11 +176,12 @@ class WakeMicEngine internal constructor(
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
      *
      * Bounded: the session's stop join, the wait for a detector call to finish and the wait for a wake already
-     * being delivered share one [CLOSE_DEADLINE_MS], and the mic slot is free when it returns. No wake delivery
-     * begins after it returns, even from a capture thread it gave up waiting for. Detectors still busy then, or busy
-     * in the calling thread (a close from inside the wake callback), are closed by the capture thread as it leaves
-     * them, never in the middle of a call; a close that runs out of time logs a `🔴` line. If that call never
-     * returns, the detectors' native resources leak until the process dies.
+     * being delivered share one [CLOSE_DEADLINE_MS], and the mic slot is free when it returns (unless a stuck
+     * capture thread's forced device release hangs too: see [PcmCaptureSession.stop]). No wake delivery begins after
+     * it returns, even from a capture thread it gave up waiting for. Detectors still busy then, or busy in the calling
+     * thread (a close from inside the wake callback), are closed by the capture thread as it leaves them, never in
+     * the middle of a call; a close that runs out of time logs a `🔴` line. If that call never returns, the
+     * detectors' native resources leak until the process dies.
      */
     fun close() {
         if (!closed.compareAndSet(false, true)) return
