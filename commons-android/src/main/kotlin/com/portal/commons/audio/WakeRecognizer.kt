@@ -1,12 +1,8 @@
 package com.portal.commons.audio
 
-import android.content.Context
 import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.audio.WakeMatcher.RecWord
 import org.json.JSONObject
-import org.vosk.Model
-import org.vosk.Recognizer
-import java.io.File
 
 /**
  * On-device multi-wake recognizer using **Vosk** (free, keyless, offline).
@@ -16,23 +12,18 @@ import java.io.File
  * unit-tested); the mic lives in [WakeMicEngine]. Adding a "hey X" never touches this file.
  *
  * Deliberately log-free — the mic owner ([WakeMicEngine]) logs the lifecycle and matches. The model
- * loads asynchronously; [onReady] fires once the (warmed) recognizer can accept audio, [onUnavailable]
- * if the model assets are missing.
+ * loads asynchronously via [loader]; [onReady] fires once the (warmed) decoder can accept audio,
+ * [onUnavailable] if the model is missing or unusable.
  */
-class WakeRecognizer(
-    context: Context,
+class WakeRecognizer internal constructor(
+    loader: VoskModelLoader,
     initialWakeWords: List<WakeWord>,
     private val onReady: () -> Unit,
     private val onUnavailable: () -> Unit,
-    // Where the Vosk model comes from. null (default) = bundled `assets/[MODEL_ASSET]`, unpacked to filesDir
-    // (portal-wake). A non-null dir = an already-unpacked model on disk, loaded directly — for a consumer that
-    // **downloads** the model at runtime instead of shipping it in the APK (portal-assistant on gen2). If the
-    // dir isn't a real model (no `am/`), [onUnavailable] fires, same as a missing asset.
-    modelDir: File? = null,
 ) {
-    @Volatile private var model: Model? = null
+    @Volatile private var model: VoskModel? = null
 
-    @Volatile private var recognizer: Recognizer? = null
+    @Volatile private var recognizer: VoskDecoder? = null
 
     // Closed before the async model load finished? The unpack callback honours this and frees rather than
     // assigning, so a teardown that races the load can't orphan a freshly-built model + recognizer.
@@ -62,10 +53,9 @@ class WakeRecognizer(
     }
 
     init {
-        // Load the model off the caller's thread; builds + warms the recognizer, then signals. Two sources:
-        // a downloaded dir (loaded directly) or the bundled asset (unpacked to filesDir) — see [modelDir].
+        // Load the model off the caller's thread; builds + warms the recognizer, then signals.
         try {
-            if (modelDir != null) loadFromDir(modelDir) else unpackFromAssets(context)
+            loader.load(::onModelLoaded, onUnavailable)
         } catch (
             @Suppress("SwallowedException")
             t: Throwable,
@@ -78,11 +68,11 @@ class WakeRecognizer(
     }
 
     /**
-     * Commit a freshly-loaded [Model]: build + warm the recognizer, then signal [onReady]/[onUnavailable].
+     * Commit a freshly-loaded [VoskModel]: build + warm the recognizer, then signal [onReady]/[onUnavailable].
      * Honours a [close] that raced the (async) load by **freeing** rather than assigning — nothing else holds
-     * the model, so this is the only path that frees it. Shared by both load sources.
+     * the model, so this is the only path that frees it.
      */
-    private fun onModelLoaded(m: Model) {
+    private fun onModelLoaded(m: VoskModel) {
         if (closed) {
             runCatching { m.close() }
             return
@@ -99,38 +89,6 @@ class WakeRecognizer(
         if (rec != null) onReady() else onUnavailable()
     }
 
-    /** Bundled-asset source (portal-wake): unpack `assets/[MODEL_ASSET]` into filesDir, then [onModelLoaded]. */
-    private fun unpackFromAssets(context: Context) {
-        org.vosk.android.StorageService.unpack(
-            context,
-            MODEL_ASSET,
-            MODEL_TARGET,
-            { m -> onModelLoaded(m) },
-            { onUnavailable() },
-        )
-    }
-
-    /**
-     * Downloaded-model source (portal-assistant on gen2): the model is already unpacked on disk, so load the
-     * [Model] straight from [dir] on a background thread (the native load is heavy). A missing/partial dir
-     * (no `am/`) is treated as "no model" — [onUnavailable], same as a missing asset.
-     */
-    private fun loadFromDir(dir: File) {
-        // A complete Vosk model has all of [MODEL_DIRS]; a partial dir (e.g. a truncated download) fails fast
-        // here instead of after a slow native Model() load — defense in depth for any caller passing modelDir.
-        if (MODEL_DIRS.any { !File(dir, it).isDirectory }) {
-            onUnavailable()
-            return
-        }
-        Thread {
-            val m = runCatching { Model(dir.absolutePath) }.getOrNull()
-            if (m != null) onModelLoaded(m) else onUnavailable()
-        }.apply {
-            isDaemon = true
-            name = "wake-model-load"
-        }.start()
-    }
-
     /**
      * Feed one frame of 16 kHz mono 16-bit PCM. Returns an [Outcome] when this frame finalizes a decode
      * (Vosk endpointed) — a [Outcome.Match] on a genuine wake, a [Outcome.NearMiss] when a keyword decoded
@@ -142,8 +100,8 @@ class WakeRecognizer(
      */
     fun accept(buf: ByteArray, n: Int): Outcome? {
         val rec = recognizer ?: return null
-        if (!rec.acceptWaveForm(buf, n)) return null
-        val words = parseResult(rec.result)
+        if (!rec.acceptFrame(buf, n)) return null
+        val words = parseResult(rec.finalResult())
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
             is WakeMatcher.Outcome.Match -> Outcome.Match(o.id, render(words))
             is WakeMatcher.Outcome.NearMiss -> Outcome.NearMiss(render(words), o.reason)
@@ -159,7 +117,7 @@ class WakeRecognizer(
      */
     fun isMidUtterance(): Boolean {
         val rec = recognizer ?: return false
-        return runCatching { parsePartialText(rec.partialResult) }.getOrDefault("").isNotEmpty()
+        return runCatching { parsePartialText(rec.partialResult()) }.getOrDefault("").isNotEmpty()
     }
 
     /** A finalized decode: a confirmed wake, a loggable near-miss, or a keyword-free flush. */
@@ -192,12 +150,12 @@ class WakeRecognizer(
 
     /**
      * Swap the grammar to a new wake set **without reloading the model** (the model never changes — only the
-     * grammar does). Builds a fresh [Recognizer] from the already-loaded model, then atomically swaps it in
-     * and closes the *old recognizer only*. Cheap (no [org.vosk.android.StorageService.unpack], no model
+     * grammar does). Builds a fresh [VoskDecoder] from the already-loaded model, then atomically swaps it in
+     * and closes the *old recognizer only*. Cheap (no `StorageService.unpack`, no model
      * reload, no leaked unpack executor) — the structural fix for the per-package-update leak.
      *
      * MUST be called on the capture thread (same thread as [accept]) so we never close a native recognizer
-     * while [accept]'s `acceptWaveForm` is in flight on it — the engine enforces this by applying the swap at
+     * while [accept]'s `acceptFrame` is in flight on it — the engine enforces this by applying the swap at
      * a frame boundary. If the model hasn't loaded yet, we just stash the new set; the pending unpack
      * callback builds from it. If the rebuild fails, the old recognizer AND the old [wakeWords] both keep
      * running, so [accept]'s matcher never disagrees with the live native grammar (we don't go deaf).
@@ -225,13 +183,11 @@ class WakeRecognizer(
         model = null
     }
 
-    private fun buildRecognizer(m: Model, words: List<WakeWord> = wakeWords): Recognizer? = runCatching {
+    private fun buildRecognizer(m: VoskModel, words: List<WakeWord> = wakeWords): VoskDecoder? = runCatching {
         // Grammar-biased recognition toward the wake phrases; fall back to open vocabulary if the model
-        // build rejects the grammar. setWords gives the per-word confidence the matcher gates on.
+        // build rejects the grammar.
         val grammar = buildGrammar(words)
-        val rec = runCatching { Recognizer(m, PcmCaptureFormat.SAMPLE_RATE.toFloat(), grammar) }
-            .getOrElse { Recognizer(m, PcmCaptureFormat.SAMPLE_RATE.toFloat()) }
-        runCatching { rec.setWords(true) }
+        val rec = runCatching { m.newDecoder(grammar) }.getOrElse { m.newDecoder(null) }
 
         warmUpRecognizer(rec)
         rec
@@ -246,7 +202,7 @@ class WakeRecognizer(
         warmUpRecognizer(recognizer)
     }
 
-    private fun warmUpRecognizer(rec: Recognizer?) {
+    private fun warmUpRecognizer(rec: VoskDecoder?) {
         runCatching {
             val r = rec ?: return
             // Prime Kaldi's online decoder with ~1 s of silence, not just one frame. A single frame forces
@@ -255,14 +211,13 @@ class WakeRecognizer(
             // idle reset) is dropped — observed on-device as `[jarvis(..)] rejected: no 'hey'` misses where
             // the leading "hey" never decodes. Feeding silence (cheap) settles it so "hey jarvis" lands whole.
             val silence = ByteArray(PcmCaptureFormat.FRAME_BYTES)
-            repeat(WARMUP_SILENCE_FRAMES) { r.acceptWaveForm(silence, silence.size) }
+            repeat(WARMUP_SILENCE_FRAMES) { r.acceptFrame(silence, silence.size) }
         }
     }
 
     companion object {
-        const val MODEL_ASSET = "model-en-us" // assets/model-en-us/
-        const val MODEL_TARGET = "vosk-model" // unpacked into filesDir
-        private val MODEL_DIRS = listOf("am", "conf", "graph", "ivector") // every dir a complete Vosk model has
+        const val MODEL_ASSET = LibVoskModelLoader.MODEL_ASSET
+        const val MODEL_TARGET = LibVoskModelLoader.MODEL_TARGET
         const val NO_CONF = -1.0 // sentinel: recognizer gave no per-word confidence
         const val WARMUP_SILENCE_FRAMES = 10 // ~1 s of silence to settle the online decoder after a reset
 

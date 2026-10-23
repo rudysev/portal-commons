@@ -1,6 +1,5 @@
 package com.portal.commons.audio
 
-import android.content.Context
 import com.portal.commons.PcmCaptureFormat
 import java.io.File
 
@@ -17,12 +16,13 @@ import java.io.File
  * cooling down, [accept] skips inference and idle-reset. A match reports via [WakeDetector.Events.onWake];
  * diagnostics carry the exact `near-miss …` / `flushed final …` strings the mic owner used to log.
  */
-class VoskWakeDetector private constructor(
-    context: Context,
+class VoskWakeDetector internal constructor(
+    loader: VoskModelLoader,
     initialWakeWords: List<WakeWord>,
     private val events: WakeDetector.Events,
     private val handoffCooldown: WakeHandoffCooldown,
-    modelDir: File?,
+    // Milliseconds, for the idle-reset clock. Injected so tests drive time.
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : WakeDetector {
 
     override val id: String = ID
@@ -33,20 +33,19 @@ class VoskWakeDetector private constructor(
     private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
 
     private val recognizer = WakeRecognizer(
-        context,
+        loader,
         initialWakeWords,
         onReady = {
             recognizerReady = true
             events.onReady(ID)
         },
         onUnavailable = { events.onUnavailable(ID) },
-        modelDir = modelDir,
     )
 
     override fun start() {
         wasRecognizerReady = false
         recognizer.reset()
-        idleReset.noteFlushed(System.currentTimeMillis())
+        idleReset.noteFlushed(clock())
     }
 
     override fun accept(buf: ByteArray, n: Int) {
@@ -65,7 +64,7 @@ class VoskWakeDetector private constructor(
 
     override fun updateWakeWords(words: List<WakeWord>) {
         recognizer.rebuildGrammar(words)
-        idleReset.noteFlushed(System.currentTimeMillis())
+        idleReset.noteFlushed(clock())
     }
 
     override fun close() {
@@ -73,7 +72,7 @@ class VoskWakeDetector private constructor(
     }
 
     private fun maybeIdleReset() {
-        val now = System.currentTimeMillis()
+        val now = clock()
         val decision = idleReset.decide(now, recognizer::isMidUtterance)
         if (decision == IdleResetPolicy.Decision.KEEP) return
         recognizer.reset()
@@ -98,7 +97,7 @@ class VoskWakeDetector private constructor(
 
     private fun tryAcceptFrame(buf: ByteArray, n: Int) {
         val outcome = recognizer.accept(buf, n) ?: return
-        idleReset.noteFlushed(System.currentTimeMillis())
+        idleReset.noteFlushed(clock())
         when (outcome) {
             is WakeRecognizer.Outcome.Match ->
                 events.onWake(WakeEvent(ID, outcome.id, outcome.transcript))
@@ -130,7 +129,12 @@ class VoskWakeDetector private constructor(
         }
 
         fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
-            VoskWakeDetector(host.context, host.wakeWords, host.events, host.handoffCooldown, modelDir)
+            VoskWakeDetector(
+                LibVoskModelLoader(host.context, modelDir),
+                host.wakeWords,
+                host.events,
+                host.handoffCooldown,
+            )
         }
     }
 }
