@@ -20,6 +20,8 @@ java {
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_11)
+        // Keep the build warning-free: any compiler warning fails compilation.
+        allWarningsAsErrors.set(true)
     }
 }
 
