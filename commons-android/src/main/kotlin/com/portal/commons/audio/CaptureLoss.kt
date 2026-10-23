@@ -1,15 +1,15 @@
 package com.portal.commons.audio
 
 /**
- * Why capture is not running while the consumer wants it running (see **Capture loss** in `GLOSSARY.md`). Delivered
- * through [WakeMicConfig.onCaptureLost] at most once per [WakeMicEngine.start]; [reason] is for the log.
+ * A capture loss and its cause, as defined under **Capture loss** in `GLOSSARY.md`. Delivered through
+ * [WakeMicConfig.onCaptureLost]; [reason] is for the log.
  */
 sealed interface CaptureLoss {
     val reason: String
 
-    /** The mic could not be opened, including a start refused because a previous capture is wedged. */
+    /** Not granted: the mic could not be opened. */
     data class NotGranted(override val reason: String) : CaptureLoss
 
-    /** Capture was running and died, including a failed rebuild. */
+    /** Dropped: capture was running and died. */
     data class Dropped(override val reason: String) : CaptureLoss
 }

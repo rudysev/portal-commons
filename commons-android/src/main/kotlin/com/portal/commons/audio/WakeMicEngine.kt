@@ -20,12 +20,9 @@ import java.util.concurrent.atomic.AtomicReference
  * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] synchronously on the capture thread,
  * readiness and unavailability on the main thread, and a log line for each.
  *
- * Owns **capture loss** (see `GLOSSARY.md`): from [start] until the next [pause] or [close] capture is wanted, and the
- * first way it fails to run is reported once as [WakeMicConfig.onCaptureLost] with a [CaptureLoss] cause:
- * [CaptureLoss.NotGranted] (the mic could not be opened, including a start refused because a previous capture is
- * wedged) or [CaptureLoss.Dropped] (capture was running and died, including a failed rebuild). A requested pause, a
- * stale or discarded capture session, and a loss a newer [start] has overtaken report nothing. After a loss the engine
- * is idle, as after [pause]; it never retries on its own, so retry policy stays with the consumer.
+ * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost]. A stale or discarded
+ * capture session and a loss a newer [start] has overtaken report nothing. After a loss the engine is idle, as after
+ * [pause]; it never retries on its own, so retry policy stays with the consumer.
  *
  * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onDetectorReady],
  * [WakeMicConfig.onDetectorUnavailable]) is always posted to the main looper, never run inline, even when the event
@@ -132,9 +129,9 @@ class WakeMicEngine internal constructor(
 
     /**
      * Wants capture and (re)acquires the mic, running [WakeMicConfig.beforeMicAcquire] first. Returns nothing: a mic
-     * that can't be opened, or a start refused because a previous capture thread is wedged, arrives later as a posted
-     * [CaptureLoss.NotGranted]. While capture is still wanted and no loss has been raised it keeps the current capture
-     * (a loss that capture raises later is still reported). A logged no-op after [close].
+     * that can't be had, a refused start included, arrives later as a posted [CaptureLoss]. While capture is still
+     * wanted and no loss has been raised it keeps the current capture (a loss that capture raises later is still
+     * reported). A logged no-op after [close].
      */
     fun start() {
         if (ignoredAfterClose("start()")) return

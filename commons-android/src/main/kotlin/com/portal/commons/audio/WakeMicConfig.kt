@@ -23,9 +23,8 @@ data class WakeMicConfig(
     val onDetectorReady: (detectorId: String) -> Unit = {},
     val onDetectorUnavailable: (detectorId: String) -> Unit = {},
     /**
-     * A [CaptureLoss]: capture stopped running while it was wanted (from [WakeMicEngine.start] until the next
-     * [WakeMicEngine.pause] or [WakeMicEngine.close]), for a reason the consumer did not ask for. At most once per
-     * start; the engine is then idle, as after a pause, and never retries on its own: retry by calling start again.
+     * A [CaptureLoss] (see **Capture loss** in `GLOSSARY.md`). The engine is then idle, as after a pause, and never
+     * retries on its own: retry by calling [WakeMicEngine.start].
      */
     val onCaptureLost: (CaptureLoss) -> Unit = {},
     val beforeMicAcquire: () -> Unit = {},
