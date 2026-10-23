@@ -10,7 +10,8 @@ import com.portal.commons.DebugLog
  *   the consumer can pause capture with minimum latency (~one frame) before handoff. Post to your service's
  *   main/arbiter thread before touching UI or other capture state.
  * - [onDetectorReady], [onDetectorUnavailable], [onError], [onStopped] — **main thread**. The engine
- *   marshals these from the capture or model-load threads so consumers can update service/UI state directly.
+ *   marshals these from the capture thread (or a detector's model-load thread) so consumers can update
+ *   service/UI state directly.
  * - [beforeMicAcquire] — **caller thread** of [WakeMicEngine.start], synchronously before the mic is opened.
  */
 data class WakeMicConfig(

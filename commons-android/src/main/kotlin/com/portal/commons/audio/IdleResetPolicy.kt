@@ -1,17 +1,17 @@
 package com.portal.commons.audio
 
 /**
- * Decides **when** [VoskWakeDetector] should bound Vosk's native decode lattice with a [WakeRecognizer.reset].
+ * Decides **when** [VoskWakeDetector] should bound Vosk's native decode lattice with a decoder reset.
  *
- * The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar recognizer can
- * go a long time without finalizing, and the never-flushed "current utterance" grows ~3.8 MB/min (measured
- * on-device). A [WakeRecognizer.reset] flushes it — but reset also discards the in-flight partial, so one
+ * The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar decoder can
+ * go a long time without finalizing, and the never-bounded lattice grows ~3.8 MB/min (measured
+ * on-device). A decoder reset flushes it — but reset also discards the in-flight partial, so one
  * that lands mid "hey jarvis" throws away the already-decoded "hey" and the wake vanishes without even a
  * near-miss. This policy issues that reset as a **backstop**: only when it is both needed and safe.
  *
  * Two rules:
  *  1. **Reset only when the decoder is quiet.** Once the lattice has gone [quietResetMs] unflushed, the reset
- *     waits for a frame with no in-flight partial ([WakeRecognizer.isMidUtterance]) so it can't bisect an
+ *     waits for a frame with no in-flight partial (the decoder's partial result) so it can't bisect an
  *     utterance. [forceResetMs] is the hard cap: past it the reset fires even mid-decode, so pathological
  *     continuous noise (a TV that never yields a quiet frame) still can't grow the lattice unbounded — worst
  *     case it holds ~[forceResetMs] of audio (< 4 MB).
@@ -22,10 +22,10 @@ package com.portal.commons.audio
  *     correct, not a stall: those endpoints are what bound memory. The manual reset earns its keep only in
  *     the rare continuous-audio case where Vosk stops endpointing entirely.
  *
- * Pure and clock-free (the caller passes `nowMs`), so the rules are unit-tested. Single-threaded by
- * contract: owned and driven by the engine's capture thread only.
+ * Pure and clock-free (the caller passes `nowMs`); the rules are tested through [VoskWakeDetector]. Single-threaded by
+ * contract: owned and driven on the capture thread only.
  */
-class IdleResetPolicy(
+internal class IdleResetPolicy(
     // Unflushed this long → reset at the next quiet frame (rule 1). A backstop, not a fixed cadence: rule 2
     // keeps restarting the clock on natural endpoints, so in most rooms this never trips.
     private val quietResetMs: Long = DEFAULT_QUIET_RESET_MS,
@@ -51,7 +51,7 @@ class IdleResetPolicy(
     }
 
     /**
-     * The lattice was just bounded — by a manual reset, a grammar rebuild (fresh recognizer), or a natural
+     * The lattice was just bounded — by a manual reset, a grammar rebuild (fresh decoder), or a natural
      * Vosk endpoint (any finalized decode flushes it). Restarts the unflushed clock.
      */
     fun noteFlushed(nowMs: Long) {

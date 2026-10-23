@@ -3,7 +3,6 @@ package com.portal.commons.audio
 import com.portal.commons.audio.ScriptedDecoder.Companion.frame
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Test
 import kotlin.concurrent.thread
 
@@ -32,7 +31,6 @@ class VoskWakeDetectorRaceTest {
         load.join(5_000)
     }
 
-    @Ignore("fixed in 02: today the load thread overwrites the swap's decoder, leaking it on the old words")
     @Test(timeout = 10_000)
     fun grammarSwapDuringLoadLeavesOneLiveDecoderOnTheNewWords() {
         val d = detector()
@@ -44,7 +42,6 @@ class VoskWakeDetectorRaceTest {
         assertTrue("every other decoder freed", (model.decoders - live).all { it.closed })
     }
 
-    @Ignore("fixed in 02: today close() frees the model mid-build and the load thread frees it again (double free)")
     @Test(timeout = 10_000)
     fun closeDuringLoadFreesEverythingOnce() {
         val d = detector()
