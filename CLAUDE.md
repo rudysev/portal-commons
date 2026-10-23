@@ -1,8 +1,18 @@
 # CLAUDE.md — portal-commons
 
+## Verification and hooks
+
+Verify with `./gradlew check` (unit tests + ktlint via kotlinter, including the Gradle scripts). Fix style with
+`./gradlew formatKotlin`. ktlint config is `.editorconfig` only (ADR 0001 in portal-apps); kotlinter 5.7.0 bundles
+ktlint 1.8.0, and `.githooks/pre-commit` refuses any other CLI version, so bump both together.
+
+Hooks: `git config core.hooksPath .githooks` once per clone. `pre-commit` runs the `ktlint` CLI on staged
+`.kt`/`.kts` files (rejects, never auto-fixes); `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate
+escape hatch.
+
 ## CI
 
-`.github/workflows/ci.yml` runs `./gradlew test assembleDebug` on every push to `main` (and on
+`.github/workflows/ci.yml` runs `./gradlew check assembleDebug` on every push to `main` (and on
 `workflow_dispatch`). When it passes on `main`, it sends a `repository_dispatch` (`portal-commons-green`) that
 re-runs CI in `portal-wake` and `portal-assistant`, because both build against `portal-commons@main`. This needs the
 `APP_DISPATCH_TOKEN` secret: a fine-grained PAT with Actions and Contents write on the two app repos.
