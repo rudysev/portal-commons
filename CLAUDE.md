@@ -2,9 +2,9 @@
 
 ## Verification and hooks
 
-Verify with `./gradlew check` (unit tests + Android Lint + ktlint via kotlinter, including the Gradle scripts). Fix
-style with `./gradlew formatKotlin`. ktlint config is `.editorconfig` only (ADR 0001 in portal-apps); kotlinter 5.7.0
-bundles ktlint 1.8.0, and `.githooks/pre-commit` refuses any other CLI version, so bump both together.
+Verify with `./gradlew check` (unit tests + Android Lint + detekt + ktlint via kotlinter, including the Gradle scripts).
+Fix style with `./gradlew formatKotlin`. ktlint config is `.editorconfig` only (ADR 0001 in portal-apps); kotlinter
+5.7.0 bundles ktlint 1.8.0, and `.githooks/pre-commit` refuses any other CLI version, so bump both together.
 
 Android Lint runs in both modules (`com.android.lint` on the pure-JVM `:commons`) with `warningsAsErrors` and
 `abortOnError`, so any warning fails `check`, which lints the debug and release variants. There is no
@@ -13,11 +13,27 @@ comment. The dependency-freshness checks (`AndroidGradlePluginVersion`, `GradleD
 are disabled, because they query the network and fail whenever upstream ships a release. Reports:
 `*/build/reports/lint-results*.html`.
 
-Hooks: `git config core.hooksPath .githooks` once per clone. `pre-commit` runs the `ktlint` CLI on staged
-`.kt`/`.kts` files and `shellcheck` on staged shell scripts (`*.sh`, `*.command`, `.githooks/*`); it rejects on
-findings and never auto-fixes. `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate escape hatch.
-`.githooks/pre-commit` and `.shellcheckrc` are identical copies in portal-commons, portal-wake and portal-assistant
-(portal-apps has the same `.shellcheckrc`); change all of them together.
+detekt: `check` also runs detekt 2.0.0-alpha.6 (`dev.detekt`; still alpha, because detekt 1.x doesn't support AGP 9;
+quality-tooling ticket 08 moves it to stable) with type resolution: `detektMain` and `detektTest`, every variant. The
+config is detekt's defaults plus `config/detekt/detekt.yml`, identical in portal-commons, portal-wake and
+portal-assistant (change all three together): the coroutine opt-ins (`GlobalCoroutineUsage`, `InjectDispatcher`,
+`SleepInsteadOfDelay`, `SuspendFunSwallowedCancellation`), any TODO/FIXME/STOPSHIP comment forbidden, `@Composable`
+exempt from `FunctionNaming`, and warnings as errors. There is no baseline: suppress inline only
+(`@Suppress("RuleId")`), each with a reason comment. Lines are capped at 120: detekt's default `MaxLineLength`, and
+`max_line_length = 120` in `.editorconfig` for ktlint. Reports: `*/build/reports/detekt/`.
+
+With KGP 2.4, a compiler warning (`allWarningsAsErrors`) fails the build with only "warnings found and -Werror
+specified"; run the build with `--info` to see the warnings themselves.
+
+Hooks: `git config core.hooksPath .githooks` once per clone. `pre-commit` runs the `ktlint` and `detekt-cli` CLIs on
+staged `.kt`/`.kts` files and `shellcheck` on staged shell scripts (`*.sh`, `*.command`, `.githooks/*`); it rejects on
+findings and never auto-fixes. detekt runs there without type resolution (about a second); the type-resolved tasks run
+in `check`. The hook refuses a `detekt-cli` other than the pinned `DETEKT_VERSION` (the Gradle plugin's version, so bump
+both together). Homebrew only ships detekt 1.x: install the CLI by unzipping
+`https://github.com/detekt/detekt/releases/download/v2.0.0-alpha.6/detekt-cli-2.0.0-alpha.6.zip` and putting its `bin/`
+on your `PATH`. `pre-push` runs `./gradlew check`. `--no-verify` is the deliberate escape hatch. `.githooks/pre-commit`
+and `.shellcheckrc` are identical copies in portal-commons, portal-wake and portal-assistant (portal-apps has the same
+`.shellcheckrc`); change all of them together.
 
 ## CI
 
