@@ -13,7 +13,7 @@ import java.util.concurrent.locks.ReentrantLock
  */
 internal class SerializedDetectors(private val detectors: List<WakeDetector>, private val log: (String) -> Unit) {
     // Serializes every detector call. A capture thread that overran pause()'s stop join can still be inside a
-    // detector when start() rebuilds the session, and a Vosk recognizer run from two threads aborts the process.
+    // detector when start() begins a fresh session, and a Vosk recognizer run from two threads aborts the process.
     private val lock = ReentrantLock()
 
     @Volatile private var closePending = false

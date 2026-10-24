@@ -126,7 +126,11 @@ class WakeMicEngineTest {
 
     @Volatile private var closeOnWake = false
 
-    private fun newEngine(detectorCount: Int = 1, onCreate: (WakeDetector.Host) -> Unit = {}) = WakeMicEngine(
+    private fun newEngine(
+        detectorCount: Int = 1,
+        newDevice: () -> PcmDevice = { device },
+        onCreate: (WakeDetector.Host) -> Unit = {},
+    ) = WakeMicEngine(
         ContextWrapper(null),
         WakeMicConfig(
             wakeWords = emptyList(),
@@ -154,7 +158,7 @@ class WakeMicEngineTest {
                 logs.add(it)
             },
         ),
-        newDevice = { device },
+        newDevice = newDevice,
         postToMain = { posted.add(it) },
         clock = { nowMs },
     ).also { engine = it }
@@ -357,6 +361,32 @@ class WakeMicEngineTest {
         engine.close()
 
         assertEquals(1, detector.closes)
+    }
+
+    @Test fun eachCaptureRequestCapturesOnAFreshDevice() {
+        val devices = CopyOnWriteArrayList<SteppedDevice>()
+        newEngine(newDevice = { SteppedDevice().also { devices.add(it) } })
+        engine.start()
+        devices.last().push()
+        engine.pause()
+        engine.start()
+        devices.last().push()
+
+        assertEquals(2, devices.size)
+        assertEquals(listOf(1, 1), devices.map { it.opens })
+        assertEquals(listOf(0L, 0L), detector.accepts)
+    }
+
+    @Test fun aStartAfterALossCapturesAgain() {
+        newEngine()
+        device.failOpens = 1
+        engine.start()
+        awaitLogThenRunPosted("pcm open failed")
+        engine.start()
+        device.push()
+
+        assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
+        assertEquals(listOf(0L), detector.accepts)
     }
 
     @Test fun aRequestedPauseDeliversNoCaptureLoss() {

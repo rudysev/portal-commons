@@ -20,14 +20,15 @@ import java.util.concurrent.atomic.AtomicReference
  * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] synchronously on the capture thread,
  * readiness and unavailability on the main thread, and a log line for each.
  *
- * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost]. A stale or discarded
- * capture session and a loss a newer [start] has overtaken report nothing. After a loss the engine is idle, as after
- * [pause]; it never retries on its own, so retry policy stays with the consumer.
+ * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost], at most once per
+ * **capture request**. Each capture request captures on a fresh session and device. A loss a [pause] or a newer
+ * [start] has overtaken reports nothing. After a loss the engine is idle, as after [pause]; it never retries on its
+ * own, so retry policy stays with the consumer.
  *
  * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onDetectorReady],
  * [WakeMicConfig.onDetectorUnavailable]) is always posted to the main looper, never run inline, even when the event
  * happens on the main thread, so none runs inside a call the consumer is making to the engine (its constructor
- * included). The closed and capture-generation checks run when the callback is delivered, not when it is posted.
+ * included). The closed and capture request checks run when the callback is delivered, not when it is posted.
  *
  * **Closed state.** [close] is terminal and idempotent: after it no consumer callback is delivered (including ones
  * already posted), and [start] and [pause] are logged no-ops. Its waits are bounded, and it is safe from any thread,
@@ -104,49 +105,42 @@ class WakeMicEngine internal constructor(
     // the read and the clear is never lost.
     private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
 
-    private val losses = CaptureLossTracker(post = ::deliverOnMain) { loss ->
+    private val requests = CaptureRequests(post = ::deliverOnMain) { loss ->
         config.log("capture lost (${loss.javaClass.simpleName}): ${loss.reason}")
         config.onCaptureLost(loss)
     }
 
-    @Volatile private var session = buildSession()
+    // The session of the newest capture request; null until the first start().
+    @Volatile private var session: PcmCaptureSession? = null
 
-    private fun buildSession(): PcmCaptureSession {
-        lateinit var built: PcmCaptureSession
-        built = PcmCaptureSession(
-            device = newDevice(),
-            onFrame = { buf, n -> onFrame(built, buf, n) },
-            onStarted = { onStarted(built) },
-            onLost = { if (session === built) losses.lost(it) },
-            log = config.log,
-            threadName = "wake-capture",
-            rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
-            idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
-            silenceWindowMs = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS,
-        )
-        return built
-    }
+    private fun newSession(request: CaptureRequests.CaptureRequest) = PcmCaptureSession(
+        device = newDevice(),
+        onFrame = { buf, n -> onFrame(request, buf, n) },
+        onStarted = { onStarted(request) },
+        onLost = request::lost,
+        log = config.log,
+        threadName = "wake-capture",
+        rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
+        idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
+        silenceWindowMs = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS,
+    )
 
     /**
-     * Wants capture and (re)acquires the mic, running [WakeMicConfig.beforeMicAcquire] first. Returns nothing: a mic
-     * that can't be opened arrives later as a posted [CaptureLoss]. A wedged previous capture (a thread that
-     * outlived [pause]'s stop join) doesn't block it: the engine starts a fresh session and reports no loss. While
-     * capture is still wanted and no loss has been raised it keeps the current capture (a loss that capture raises
-     * later is still reported). A logged no-op after [close].
+     * Begins a capture request and acquires the mic on a fresh session and device, running
+     * [WakeMicConfig.beforeMicAcquire] first. Returns nothing: a mic that can't be opened arrives later as a posted
+     * [CaptureLoss]. A wedged previous capture (a thread that outlived [pause]'s stop join) doesn't block it, and
+     * reports no loss. During an open capture request that has raised no loss it keeps the current capture (a loss
+     * that capture raises later is still reported). A logged no-op after [close].
      */
     fun start() {
         if (ignoredAfterClose("start()")) return
         config.beforeMicAcquire()
-        if (!losses.want()) {
-            config.log("start() while capture is already wanted — keeping the current capture")
+        val request = requests.begin()
+        if (request == null) {
+            config.log("start() during an open capture request — keeping the current capture")
             return
         }
-        if (!session.start()) {
-            // A fresh session has no thread yet, so its start() always starts one.
-            config.log("wake capture wedged — rebuilding session and retrying")
-            session = buildSession()
-            session.start()
-        }
+        session = newSession(request).also { it.start() }
     }
 
     /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
@@ -155,13 +149,13 @@ class WakeMicEngine internal constructor(
     }
 
     /**
-     * Stops wanting capture and yields the mic slot. Reports no capture loss, and cancels one already posted but not
-     * yet delivered. A harmless no-op after a loss; a logged no-op after [close].
+     * Ends the capture request and yields the mic slot. Reports no capture loss, and cancels one already posted but
+     * not yet delivered. A harmless no-op after a loss; a logged no-op after [close].
      */
     fun pause() {
         if (ignoredAfterClose("pause()")) return
-        losses.unwant()
-        session.stop()
+        requests.end()
+        session?.stop()
         config.log("mic paused (yielded slot)")
     }
 
@@ -187,21 +181,21 @@ class WakeMicEngine internal constructor(
         if (!closed.compareAndSet(false, true)) return
         val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PcmCaptureSession.STOP_DEADLINE_MS)
         val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
-        session.stop(timeoutMs = PcmCaptureSession.STOP_DEADLINE_MS)
+        session?.stop(timeoutMs = PcmCaptureSession.STOP_DEADLINE_MS)
         detectors.close(timeoutMs = leftMs())
         wakeGate.close(timeoutMs = leftMs())
     }
 
-    // A discarded (wedged) session's thread may still call back once it unblocks; only the current one reaches
-    // the detectors.
-    private fun onStarted(from: PcmCaptureSession) = detectors.use { all ->
-        if (from !== session) return@use
+    // A wedged session's thread may still call back once it unblocks; only the current capture request's session
+    // reaches the detectors.
+    private fun onStarted(request: CaptureRequests.CaptureRequest) = detectors.use { all ->
+        if (!request.isCurrent) return@use
         handoffCooldownUntilMs = Long.MIN_VALUE
         all.forEach { it.start() }
     }
 
-    private fun onFrame(from: PcmCaptureSession, buf: ByteArray, n: Int) = detectors.use { all ->
-        if (from !== session) return@use
+    private fun onFrame(request: CaptureRequests.CaptureRequest, buf: ByteArray, n: Int) = detectors.use { all ->
+        if (!request.isCurrent) return@use
         applyPendingWakeWords(all)
         // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
         for (detector in all) {
