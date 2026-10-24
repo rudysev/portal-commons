@@ -389,6 +389,28 @@ class WakeMicEngineTest {
         assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses)
     }
 
+    @Test fun twoSecondsOfDigitalSilenceDeliversExactlyOneSilenced() {
+        newEngine().start()
+        repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
+        device.offer() // the 20th fills the 2 s window, and capture ends inside it
+        awaitLogThenRunPosted("pcm capture stopped")
+        Thread.sleep(50) // room for a second, wrong, report to arrive
+        runPosted()
+
+        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), losses)
+    }
+
+    @Test fun aPauseInsideTheSilenceDeliversNothingAndTheNextStartGetsAFullWindow() {
+        newEngine().start()
+        repeat(10) { device.push() }
+        engine.pause()
+        engine.start()
+        repeat(19) { device.push() } // 2.9 s of silence across the pause, but only 1.9 s since the start
+        runPosted()
+
+        assertEquals(emptyList<CaptureLoss>(), losses)
+    }
+
     @Test fun aLossThatANewerStartOvertookIsDroppedWhenTheQueueDrains() {
         newEngine()
         device.failOpens = 1

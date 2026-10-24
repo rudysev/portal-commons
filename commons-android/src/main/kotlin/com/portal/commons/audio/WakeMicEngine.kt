@@ -123,6 +123,8 @@ class WakeMicEngine internal constructor(
             threadName = "wake-capture",
             rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
             idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
+            silenceWindowMs = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS,
+            onSilenced = { if (session === built) losses.runSilenced(it) },
         )
         return built
     }

@@ -660,4 +660,134 @@ class PcmCaptureSessionTest {
         assertTrue("no exceptions from concurrent start/stop: $errors", errors.isEmpty())
         session.stop() // ensure final state is stopped
     }
+
+    /**
+     * Serves full frames of digital silence whose first sample is the next value from [frameSamples] (repeating the
+     * last one forever once the list runs out), so a test can script exactly one non-zero sample breaking a silence.
+     * [onOpen] runs on every open, so a test can see a rebuild.
+     */
+    private class SampleDevice(private val frameSamples: List<Short>, private val onOpen: () -> Unit = {}) :
+        PcmDevice {
+        private var next = 0 // capture-thread only
+
+        override fun open(): Boolean {
+            onOpen()
+            return true
+        }
+
+        override fun read(buf: ByteArray, offset: Int, length: Int): Int {
+            val sample = frameSamples[minOf(next, frameSamples.lastIndex)].toInt()
+            next++
+            buf.fill(0, offset, offset + length)
+            buf[offset] = sample.toByte()
+            buf[offset + 1] = (sample shr 8).toByte()
+            return length
+        }
+
+        override fun stop() = Unit
+
+        override fun release() = Unit
+    }
+
+    private class SilenceRecorder {
+        val frames = AtomicInteger()
+        val framesAtSilenced = AtomicInteger(-1)
+        val errors = CopyOnWriteArrayList<String>()
+        val stopped = CountDownLatch(1)
+
+        fun session(device: PcmDevice, silenceWindowMs: Long? = SILENCE_WINDOW_MS, idleRebuildMs: Long? = null) =
+            PcmCaptureSession(
+                device = device,
+                onFrame = { _, _ -> frames.incrementAndGet() },
+                onError = { errors.add(it) },
+                onStopped = { stopped.countDown() },
+                onSilenced = { framesAtSilenced.compareAndSet(-1, frames.get()) },
+                silenceWindowMs = silenceWindowMs,
+                idleRebuildMs = idleRebuildMs,
+                pollMs = 0,
+            )
+    }
+
+    @Test(timeout = 10_000)
+    fun aWindowOfDigitalSilenceEndsCaptureAsSilenced() {
+        val recorder = SilenceRecorder()
+        val session = recorder.session(SampleDevice(listOf(0)))
+
+        session.start()
+        await(recorder.stopped)
+
+        // 2 s of 16 kHz audio in 100 ms frames is 20 frames: silenced on the 20th, and capture ends there.
+        assertEquals(FRAMES_IN_WINDOW, recorder.framesAtSilenced.get())
+        assertEquals(FRAMES_IN_WINDOW, recorder.frames.get())
+        assertTrue("silence is not an error: ${recorder.errors}", recorder.errors.isEmpty())
+        session.stop()
+    }
+
+    @Test(timeout = 10_000)
+    fun oneNonZeroSampleRestartsTheSilenceWindow() {
+        val recorder = SilenceRecorder()
+        // Frame 20 opens with one non-zero sample, so it leaves 1,599 trailing zeros: the window (32,000 samples) is
+        // full only after 20 more all-zero frames (1,599 + 20 × 1,600), on frame 40.
+        val session = recorder.session(SampleDevice(List<Short>(FRAMES_IN_WINDOW - 1) { 0 } + 1.toShort() + 0))
+
+        session.start()
+        await(recorder.stopped)
+
+        assertEquals(40, recorder.framesAtSilenced.get())
+        session.stop()
+    }
+
+    @Test(timeout = 10_000)
+    fun aRebuildRestartsTheSilenceWindow() {
+        val recorder = SilenceRecorder()
+        val opens = AtomicInteger()
+        // The first open serves 10 silent frames and then stalls, so the idle watchdog rebuilds; the rebuilt device
+        // serves silence forever. Silenced only after a full window on the rebuilt device: 10 + 20 frames.
+        val device = object : PcmDevice {
+            private var served = 0 // capture-thread only
+
+            override fun open(): Boolean {
+                opens.incrementAndGet()
+                served = 0
+                return true
+            }
+
+            override fun read(buf: ByteArray, offset: Int, length: Int): Int {
+                if (opens.get() == 1 && served == FRAMES_IN_WINDOW / 2) return 0
+                served++
+                buf.fill(0, offset, offset + length)
+                return length
+            }
+
+            override fun stop() = Unit
+
+            override fun release() = Unit
+        }
+        val session = recorder.session(device, idleRebuildMs = 50)
+
+        session.start()
+        await(recorder.stopped)
+
+        assertEquals("the stall rebuilt the device", 2, opens.get())
+        assertEquals(30, recorder.framesAtSilenced.get())
+        session.stop()
+    }
+
+    @Test(timeout = 10_000)
+    fun withoutASilenceWindowDigitalSilenceKeepsCapturing() {
+        val recorder = SilenceRecorder()
+        val session = recorder.session(SampleDevice(listOf(0)), silenceWindowMs = null)
+
+        session.start()
+        while (recorder.frames.get() < 2 * FRAMES_IN_WINDOW) Thread.sleep(1)
+        session.stop()
+        await(recorder.stopped)
+
+        assertEquals("never silenced", -1, recorder.framesAtSilenced.get())
+    }
+
+    private companion object {
+        const val SILENCE_WINDOW_MS = 2_000L
+        const val FRAMES_IN_WINDOW = 20
+    }
 }

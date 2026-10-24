@@ -29,5 +29,5 @@ _Avoid_: flush buffer (replaying it is a "replay", not a "flush")
 ### Capture
 
 **Capture loss**:
-Capture is not running while the consumer wants it running (between a `start()` and the next `pause()`/`close()`) for a reason the consumer did not ask for. Reported at most once per `start()`, with one of two causes: **not granted** (the mic could not be opened) or **dropped** (capture was running and died, including a failed rebuild).
+Capture is not running, or is running but delivering no audio, while the consumer wants it running (between a `start()` and the next `pause()`/`close()`) for a reason the consumer did not ask for. Reported at most once per `start()`, with one of three causes: **not granted** (the mic could not be opened), **dropped** (capture was running and died, including a failed rebuild) or **silenced** (capture is running but delivers only digital silence, whatever the reason).
 _Avoid_: capture stopped (a requested pause also stops capture), mic error
