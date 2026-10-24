@@ -16,8 +16,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - [FakeDevice] is **non-blocking** (returns `0` when idle, like the real `READ_NON_BLOCKING`), with a
  *    configurable `bytesPerRead` so we can exercise partial-read frame assembly and the idle/error paths.
  *  - [BlockingFake] deliberately parks in `read` on a latch to stand in for the residual *hung native call*
- *    case (a non-blocking read never parks in production), exercising the bounded-join + alive-thread guard
- *    and the post-stop "no frame after stop" gate.
+ *    case (a non-blocking read never parks in production), exercising the bounded join + force-release and the
+ *    post-stop "no frame after stop" gate.
  * Each test has a hard timeout so a regression (e.g. `stop()` hanging) fails the suite instead of blocking it.
  * Tests pass `pollMs = 0` so the idle path doesn't add real sleeps.
  */
@@ -155,7 +155,7 @@ class PcmCaptureSessionTest {
             pollMs = 0,
         )
 
-        assertTrue(session.start())
+        session.start()
         await(gotFrames)
         session.stop()
         await(log.stopped)
@@ -308,8 +308,7 @@ class PcmCaptureSessionTest {
     @Test(timeout = 10_000)
     fun forceReleasesDeviceWhenJoinTimesOut() {
         // If the capture thread overruns the join (a stuck callback or a hung native call), stop() force-
-        // releases the device as a last resort so the mic slot can't stay held, and the alive-thread guard
-        // makes a concurrent start() refuse.
+        // releases the device as a last resort so the mic slot can't stay held.
         val fake = BlockingFake()
         val logs = CopyOnWriteArrayList<String>()
         val session = PcmCaptureSession(
@@ -326,7 +325,6 @@ class PcmCaptureSessionTest {
         session.stop() // join times out → force-release
         assertTrue("expected a stop-timeout log", logs.any { it.contains("pcm stop timeout") })
         assertTrue("expected a force-release during stop", fake.releaseCount.get() > releasesBefore)
-        assertFalse("start() must refuse while the thread is still alive", session.start())
 
         fake.unpark() // let the thread exit so it doesn't linger
     }
@@ -445,7 +443,7 @@ class PcmCaptureSessionTest {
     fun stopDuringInFlightRebuildExitsCleanly() {
         // stop() landing while a rebuild's open() is in flight must exit cleanly: when open() returns, the
         // post-rebuild `continue` hits the top-of-loop running gate and breaks — no frame delivered, no
-        // force-release timeout, and no zombie left blocking a later start() (the mic slot stays reclaimable).
+        // force-release timeout.
         val inRebuildOpen = CountDownLatch(1)
         val proceedOpen = CountDownLatch(1)
         val frames = AtomicInteger()
@@ -486,52 +484,29 @@ class PcmCaptureSessionTest {
         assertEquals("no frame delivered when stop lands during a rebuild", 0, frames.get())
         assertEquals("a stop during a rebuild is not a loss", emptyList<CaptureLoss>(), losses.all)
         assertFalse("clean exit — no force-release timeout", logs.any { it.contains("pcm stop timeout") })
-        assertTrue("no zombie — start() succeeds after the rebuild-stop", session.start())
-        session.stop()
     }
 
     @Test(timeout = 10_000)
-    fun refusesStartWhilePreviousCaptureThreadAlive() {
-        val fake = BlockingFake()
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> },
-            stopTimeoutMs = 50,
-            pollMs = 0,
-        )
-
-        session.start()
-        await(fake.parked) // parked (hung-native stand-in) so stop() times out and leaves the thread alive
-        session.stop() // times out → thread still alive
-
-        assertFalse("start() must refuse while the previous thread is alive", session.start())
-
-        fake.unpark() // thread can now exit
-        val restarted = (0 until 100).any {
-            session.start().also { started -> if (!started) Thread.sleep(20) }
-        }
-        assertTrue("start() should succeed once the previous thread exits", restarted)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun startIsIdempotent() {
+    fun aSecondStartAndAStartAfterStopAreLoggedNoOps() {
         val fake = FakeDevice()
         val started = CountDownLatch(1)
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> },
-            log = { if (it == "pcm capture started") started.countDown() },
-            pollMs = 0,
-        )
+        val logs = CopyOnWriteArrayList<String>()
+        val log = StopLog {
+            logs.add(it)
+            if (it == "pcm capture started") started.countDown()
+        }
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, log = log, pollMs = 0)
 
-        assertTrue(session.start())
+        session.start()
         await(started)
-        assertTrue(session.start()) // already running → no second thread
-        Thread.sleep(50)
+        session.start() // already started → no second thread
+        session.stop()
+        await(log.stopped)
+        session.start() // a session is single-use → no new capture
+        Thread.sleep(50) // room for a wrong second capture to open the device
 
         assertEquals(1, fake.openCount.get())
-        session.stop()
+        assertEquals(2, logs.count { it == "pcm start ignored — a capture session is single-use" })
     }
 
     @Test(timeout = 10_000)
@@ -568,7 +543,7 @@ class PcmCaptureSessionTest {
             pollMs = 0,
         )
 
-        assertTrue(session.start()) // thread spawns; open() fails inside the loop
+        session.start() // thread spawns; open() fails inside the loop
         await(losses.lost)
         Thread.sleep(50) // room for a second, wrong, report to arrive
 
@@ -617,7 +592,7 @@ class PcmCaptureSessionTest {
     fun stopDuringOpenFiresNeitherOnStartedNorOnLost() {
         // A stop() that lands while open() is in flight must not start the consumer: onStarted is a callback like
         // any other. On gen2 a pause mid-open let the stopping thread run Vosk's reset + warm-up past the stop
-        // join, and the rebuilt session then ran the same recognizer on a second thread — a native abort. Nor is it
+        // join, and the fresh session then ran the same recognizer on a second thread — a native abort. Nor is it
         // a loss, whether the open then succeeds or fails: the stop was asked for.
         for (opened in listOf(true, false)) {
             val inOpen = CountDownLatch(1)
@@ -708,41 +683,6 @@ class PcmCaptureSessionTest {
             losses.all,
         )
         assertTrue("the mic is still released", released.get() >= 1)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun selfStopKeepsZombieGuardUntilLoopExits() {
-        // onFrame (on the capture thread) self-stops, then blocks so the loop is still "alive" mid-unwind.
-        val fake = FakeDevice().apply { framesToServe = 1 }
-        val inFrame = CountDownLatch(1)
-        val releaseFrame = CountDownLatch(1)
-        val log = StopLog()
-        lateinit var session: PcmCaptureSession
-        session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ ->
-                session.stop() // self-stop from the capture thread
-                inFrame.countDown()
-                releaseFrame.await() // hold the capture thread inside the callback (loop hasn't exited yet)
-            },
-            log = log,
-            pollMs = 0,
-        )
-
-        assertTrue(session.start())
-        await(inFrame)
-        // The capture thread is alive (parked in onFrame after self-stop) → a fresh start() must be refused.
-        assertFalse("start() must be refused while the self-stopped loop is still alive", session.start())
-
-        releaseFrame.countDown() // let the callback return so the loop reaches its finally
-        await(log.stopped)
-
-        // Once the loop has exited, start() succeeds again.
-        val restarted = (0 until 100).any {
-            session.start().also { started -> if (!started) Thread.sleep(20) }
-        }
-        assertTrue("start() should succeed after the loop fully exits", restarted)
         session.stop()
     }
 

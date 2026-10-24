@@ -13,16 +13,16 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Replays the gen2 wedge that aborted the process inside Vosk (2026-10-22): a detector call on the capture thread
- * outlasts [WakeMicEngine.pause]'s bounded stop join, so the next [WakeMicEngine.start] finds that thread still
- * alive and rebuilds the session. The detector is shared across sessions, so the wedged thread and the rebuilt
- * one must never be inside it at the same time — a Vosk recognizer is not thread-safe, and two threads in it
+ * outlasts [WakeMicEngine.pause]'s bounded stop join, so that thread is still alive when the next
+ * [WakeMicEngine.start] begins a fresh session. The detector is shared across sessions, so the wedged thread and the
+ * fresh one must never be inside it at the same time — a Vosk recognizer is not thread-safe, and two threads in it
  * abort the process on a Kaldi assertion.
  */
 class WakeMicEngineWedgeTest {
 
     /**
      * Records any moment two threads are inside it. Its first [start] / [accept] takes [firstStartMs] /
-     * [firstAcceptMs].
+     * [firstAcceptMs], during which [inSlowCall] is true.
      */
     private class OverlapDetector(private val firstStartMs: Long = 0, private val firstAcceptMs: Long = 0) :
         WakeDetector {
@@ -35,6 +35,18 @@ class WakeMicEngineWedgeTest {
         val firstAcceptEntered = CountDownLatch(1)
         val acceptCount get() = accepts.get()
 
+        @Volatile var inSlowCall = false
+            private set
+
+        private fun slow(ms: Long) {
+            inSlowCall = true
+            try {
+                Thread.sleep(ms)
+            } finally {
+                inSlowCall = false
+            }
+        }
+
         private inline fun enter(what: String, work: () -> Unit) {
             if (inside.incrementAndGet() > 1) overlaps.add(what)
             try {
@@ -44,12 +56,12 @@ class WakeMicEngineWedgeTest {
             }
         }
 
-        override fun start() = enter("start") { if (starts.getAndIncrement() == 0) Thread.sleep(firstStartMs) }
+        override fun start() = enter("start") { if (starts.getAndIncrement() == 0) slow(firstStartMs) }
 
         override fun accept(buf: ByteArray, n: Int) = enter("accept") {
             if (accepts.getAndIncrement() == 0) {
                 firstAcceptEntered.countDown()
-                Thread.sleep(firstAcceptMs)
+                slow(firstAcceptMs)
             }
         }
 
@@ -58,9 +70,12 @@ class WakeMicEngineWedgeTest {
         override fun close() = enter("close") { closes.countDown() }
     }
 
-    /** A mic that opens at once and serves a full frame on every read. */
-    private class Device : PcmDevice {
-        override fun open() = true
+    /** A mic that opens at once, running [onOpen] first, and serves a full frame on every read. */
+    private class Device(private val onOpen: () -> Unit) : PcmDevice {
+        override fun open(): Boolean {
+            onOpen()
+            return true
+        }
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
             Thread.sleep(10)
@@ -76,6 +91,9 @@ class WakeMicEngineWedgeTest {
     private val losses = CopyOnWriteArrayList<CaptureLoss>()
     private val posted = CopyOnWriteArrayList<Runnable>()
 
+    // Opens of a device while the previous capture thread was still inside its slow detector call: the wedge.
+    private val opensWhileWedged = AtomicInteger()
+
     private fun runPosted() {
         while (posted.isNotEmpty()) posted.removeAt(0).run()
     }
@@ -89,37 +107,32 @@ class WakeMicEngineWedgeTest {
             onCaptureLost = { losses.add(it) },
             log = { logs.add(it) },
         ),
-        newDevice = ::Device,
+        newDevice = { Device { if (detector.inSlowCall) opensWhileWedged.incrementAndGet() } },
         postToMain = { posted.add(it) },
     )
 
-    private fun replayWedge(detector: OverlapDetector): List<String> {
+    private fun replayWedge(detector: OverlapDetector) {
         val engine = newEngine(detector)
         engine.start()
         Thread.sleep(50) // the capture thread is inside its slow detector call
         engine.pause() // the join times out: that thread is still in the detector
-        engine.start() // refused → rebuilt session → a new capture thread
+        engine.start() // a fresh session → a new capture thread
         Thread.sleep(PAST_THE_JOIN_MS + 100) // let both threads run past the slow call
         engine.close()
-        return logs.filter { it.startsWith("pcm start refused") || it.startsWith("wake capture wedged") }
+        assertEquals("the fresh session opened while the old thread was wedged", 1, opensWhileWedged.get())
     }
 
-    private val wedged = listOf(
-        "pcm start refused — previous capture thread still alive",
-        "wake capture wedged — rebuilding session and retrying",
-    )
-
     @Test(timeout = 10_000)
-    fun wedgedInStartRebuiltSessionNeverRunsTheDetectorAlongside() {
+    fun wedgedInStartFreshSessionNeverRunsTheDetectorAlongside() {
         val detector = OverlapDetector(firstStartMs = PAST_THE_JOIN_MS) // Vosk's reset + silence warm-up
-        assertEquals(wedged, replayWedge(detector))
+        replayWedge(detector)
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }
 
     @Test(timeout = 10_000)
-    fun wedgedInAcceptRebuiltSessionNeverRunsTheDetectorAlongside() {
+    fun wedgedInAcceptFreshSessionNeverRunsTheDetectorAlongside() {
         val detector = OverlapDetector(firstAcceptMs = PAST_THE_JOIN_MS) // a slow decode
-        assertEquals(wedged, replayWedge(detector))
+        replayWedge(detector)
         assertEquals("two threads inside the detector at once", emptyList<String>(), detector.overlaps)
     }
 
@@ -139,7 +152,7 @@ class WakeMicEngineWedgeTest {
         runPosted()
 
         assertTrue("the fresh session never captured", detector.acceptCount >= 3)
-        assertTrue(logs.contains("wake capture wedged — rebuilding session and retrying"))
+        assertEquals("the fresh session opened while the old thread was wedged", 1, opensWhileWedged.get())
         assertEquals(emptyList<CaptureLoss>(), losses)
     }
 
