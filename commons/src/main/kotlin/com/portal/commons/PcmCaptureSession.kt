@@ -44,10 +44,12 @@ import kotlin.concurrent.withLock
  * can't false-fire it. Both are transient mic-loss recovery (the always-listening apps opt in).
  *
  * **Silence.** With [silenceWindowMs] set, a capture that delivers that much audio of exact-zero samples in a row
- * ends as [CaptureLoss.Silenced], with no rebuild: a silence the system imposes (a denied app-op, a silenced background
- * client) survives a reopen. Real mics never produce exact zeros for that long, even in a quiet room (checked on
- * Portal+ gen1), so there is no tolerance band. The window is counted in samples, not on a clock, and starts again
- * at every start, every rebuild and every non-zero sample.
+ * ends as [CaptureLoss.Silenced], with no rebuild: a denied app-op's silence survives a reopen (and on gen1 the
+ * reopen fails). With [rebuildOnSilence] also set, a full window first rebuilds the device, once per silence:
+ * Portal+ gen1 silences a client's open input when its app leaves the foreground, and a reopen is live again. Only a
+ * window that follows that rebuild with no sample heard in between ends capture. Real mics never produce exact zeros
+ * for that long, even in a quiet room (checked on Portal+ gen1), so there is no tolerance band. The window is counted
+ * in samples, not on a clock, and starts again at every start, every rebuild and every non-zero sample.
  */
 // The constructors are the whole configuration surface: the public one's parameters after device/onFrame are optional
 // callbacks or policies with a default, and the apps pass them by name. A parameter object would only move the same
@@ -63,6 +65,7 @@ class PcmCaptureSession internal constructor(
     private val rebuildAfterReadFailures: Int? = null,
     private val idleRebuildMs: Long? = null,
     private val silenceWindowMs: Long? = null,
+    private val rebuildOnSilence: Boolean = false,
     // Test timing, not policy: required here so a call that leaves it out picks the public constructor.
     private val pollMs: Long,
     private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
@@ -83,6 +86,7 @@ class PcmCaptureSession internal constructor(
         rebuildAfterReadFailures: Int? = null,
         idleRebuildMs: Long? = null,
         silenceWindowMs: Long? = null,
+        rebuildOnSilence: Boolean = false,
     ) : this(
         device = device,
         onFrame = onFrame,
@@ -93,6 +97,7 @@ class PcmCaptureSession internal constructor(
         rebuildAfterReadFailures = rebuildAfterReadFailures,
         idleRebuildMs = idleRebuildMs,
         silenceWindowMs = silenceWindowMs,
+        rebuildOnSilence = rebuildOnSilence,
         pollMs = DEFAULT_READ_POLL_MS,
     )
 
@@ -199,8 +204,8 @@ class PcmCaptureSession internal constructor(
     }
 
     /**
-     * Tear down and reopen the device after a fault (a read-error run, or the idle watchdog). A member
-     * function, so it closes over none of the loop's mutable locals. Returns true if the device reopened;
+     * Tear down and reopen the device after a fault (a read-error run, the idle watchdog, or a silence window). A
+     * member function, so it closes over none of the loop's mutable locals. Returns true if the device reopened;
      * false means [PcmDevice.open] failed and the capture ends as [CaptureLoss.Dropped]. Callers guard `running`
      * before calling so a stop() in flight doesn't reopen a device that's about to be torn down.
      */
@@ -271,6 +276,9 @@ class PcmCaptureSession internal constructor(
         private var zeroSamples = 0L
         private val silenceSamples = silenceWindowMs?.let { it * PcmCaptureFormat.SAMPLE_RATE / MS_PER_SECOND }
 
+        // With rebuildOnSilence: a silence window already rebuilt the device, and no sample has been heard since.
+        private var silenceRebuilt = false
+
         // Why the capture is ending, once it knows: set where a step returns false for anything but a stop.
         private var loss: CaptureLoss? = null
 
@@ -328,18 +336,30 @@ class PcmCaptureSession internal constructor(
 
         /**
          * Counts the frame just delivered against the silence window; true (and a [CaptureLoss.Silenced]) once it is
-         * full. A stop that landed during the frame is no loss: a stopping session delivers no further callback.
+         * full. With [rebuildOnSilence], a full window first rebuilds the device, and only a window that follows
+         * that rebuild with no sample heard in between ends capture. A stop that landed during the frame is no loss:
+         * a stopping session delivers no further callback.
          */
         private fun silenced(): Boolean {
             val window = silenceSamples ?: return false
-            zeroSamples = trailingZeroSamples(zeroSamples)
-            val full = zeroSamples >= window && running
-            if (full) {
-                val reason = "digital silence for ${silenceWindowMs}ms"
-                log("pcm $reason → ending capture")
-                loss = CaptureLoss.Silenced(reason)
+            val runBefore = zeroSamples
+            zeroSamples = trailingZeroSamples(runBefore)
+            if (zeroSamples < runBefore + FRAME_SAMPLES) silenceRebuilt = false // a sample heard: the stream is live
+            val reason = "digital silence for ${silenceWindowMs}ms"
+            return when {
+                zeroSamples < window || !running -> false
+
+                rebuildOnSilence && !silenceRebuilt -> {
+                    silenceRebuilt = true
+                    !rebuild(reason)
+                }
+
+                else -> {
+                    log("pcm $reason → ending capture")
+                    loss = CaptureLoss.Silenced(reason)
+                    true
+                }
             }
-            return full
         }
 
         // The zero run after this frame: it grows by the whole frame if the frame is all zeros, else it is the
@@ -409,6 +429,7 @@ class PcmCaptureSession internal constructor(
         const val DEFAULT_SILENCE_WINDOW_MS = DEFAULT_IDLE_REBUILD_MS
 
         private const val MS_PER_SECOND = 1_000L
+        private const val FRAME_SAMPLES = PcmCaptureFormat.FRAME_BYTES / PcmCaptureFormat.BYTES_PER_SAMPLE
         private const val ZERO: Byte = 0
     }
 }

@@ -751,16 +751,21 @@ class PcmCaptureSessionTest {
             losses.add(loss)
         }
 
-        fun session(device: PcmDevice, silenceWindowMs: Long? = SILENCE_WINDOW_MS, idleRebuildMs: Long? = null) =
-            PcmCaptureSession(
-                device = device,
-                onFrame = { _, _ -> frames.incrementAndGet() },
-                onLost = ::lost,
-                log = log,
-                silenceWindowMs = silenceWindowMs,
-                idleRebuildMs = idleRebuildMs,
-                pollMs = 0,
-            )
+        fun session(
+            device: PcmDevice,
+            silenceWindowMs: Long? = SILENCE_WINDOW_MS,
+            idleRebuildMs: Long? = null,
+            rebuildOnSilence: Boolean = false,
+        ) = PcmCaptureSession(
+            device = device,
+            onFrame = { _, _ -> frames.incrementAndGet() },
+            onLost = ::lost,
+            log = log,
+            silenceWindowMs = silenceWindowMs,
+            idleRebuildMs = idleRebuildMs,
+            rebuildOnSilence = rebuildOnSilence,
+            pollMs = 0,
+        )
     }
 
     @Test(timeout = 10_000)
@@ -840,6 +845,76 @@ class PcmCaptureSessionTest {
 
         assertEquals("never silenced", -1, recorder.framesAtSilenced.get())
         assertEquals("a requested stop is not a loss", emptyList<CaptureLoss>(), recorder.losses.all)
+    }
+
+    /**
+     * Serves digital silence on its first open and a live (non-zero) stream on every later open: a client the system
+     * silences mid-capture (Portal+ gen1 backgrounding the app), which a reopen brings back.
+     */
+    private class SilencedUntilReopened : PcmDevice {
+        val opens = AtomicInteger()
+
+        override fun open(): Boolean {
+            opens.incrementAndGet()
+            return true
+        }
+
+        override fun read(buf: ByteArray, offset: Int, length: Int): Int {
+            buf.fill(if (opens.get() == 1) 0 else 1, offset, offset + length)
+            return length
+        }
+
+        override fun stop() = Unit
+
+        override fun release() = Unit
+    }
+
+    @Test(timeout = 10_000)
+    fun withRebuildOnSilenceAWindowOfSilenceRebuildsAndCaptureGoesOn() {
+        val recorder = SilenceRecorder()
+        val device = SilencedUntilReopened()
+        val session = recorder.session(device, rebuildOnSilence = true)
+
+        session.start()
+        while (recorder.frames.get() < 3 * FRAMES_IN_WINDOW) Thread.sleep(1)
+        session.stop()
+        await(recorder.log.stopped)
+
+        assertEquals("the silence rebuilt the device, once", 2, device.opens.get())
+        assertEquals("a reopened live stream is no loss", emptyList<CaptureLoss>(), recorder.losses.all)
+    }
+
+    @Test(timeout = 10_000)
+    fun withRebuildOnSilenceASilenceThatSurvivesTheRebuildEndsCaptureAsSilenced() {
+        val recorder = SilenceRecorder()
+        val opens = AtomicInteger()
+        val session = recorder.session(SampleDevice(listOf(0)) { opens.incrementAndGet() }, rebuildOnSilence = true)
+
+        session.start()
+        await(recorder.losses.lost)
+
+        // One window on the first open, one more on the rebuilt device, then the loss.
+        assertEquals(2, opens.get())
+        assertEquals(2 * FRAMES_IN_WINDOW, recorder.framesAtSilenced.get())
+        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
+        session.stop()
+    }
+
+    @Test(timeout = 10_000)
+    fun withRebuildOnSilenceASoundAfterTheRebuildEarnsAnotherRebuild() {
+        val recorder = SilenceRecorder()
+        val opens = AtomicInteger()
+        // A window of silence (rebuild 1), one sound on the rebuilt device, then silence forever: the sound means the
+        // reopen worked, so the next window rebuilds again (open 3) before a last window ends capture.
+        val samples = List<Short>(FRAMES_IN_WINDOW) { 0 } + 1.toShort() + 0
+        val session = recorder.session(SampleDevice(samples) { opens.incrementAndGet() }, rebuildOnSilence = true)
+
+        session.start()
+        await(recorder.losses.lost)
+
+        assertEquals(3, opens.get())
+        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
+        session.stop()
     }
 
     private companion object {
