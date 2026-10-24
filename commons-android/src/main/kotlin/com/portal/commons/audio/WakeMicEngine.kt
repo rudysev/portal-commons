@@ -21,9 +21,10 @@ import java.util.concurrent.atomic.AtomicReference
  * readiness and unavailability on the main thread, and a log line for each.
  *
  * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost], at most once per
- * **capture request**. Each capture request captures on a fresh session and device. A loss a [pause] or a newer
- * [start] has overtaken reports nothing. After a loss the engine is idle, as after [pause]; it never retries on its
- * own, so retry policy stays with the consumer.
+ * **capture request**, which [CaptureRequests] tracks. Each capture request captures on a fresh single-use
+ * session and device, whose callbacks are bound to that request: a wedged older session's frames reach no detector,
+ * and its loss is never reported. A loss a [pause] or a newer [start] has overtaken reports nothing. After a loss
+ * the engine is idle, as after [pause]; it never retries on its own, so retry policy stays with the consumer.
  *
  * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onDetectorReady],
  * [WakeMicConfig.onDetectorUnavailable]) is always posted to the main looper, never run inline, even when the event
@@ -181,7 +182,7 @@ class WakeMicEngine internal constructor(
         if (!closed.compareAndSet(false, true)) return
         val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PcmCaptureSession.STOP_DEADLINE_MS)
         val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
-        session?.stop(timeoutMs = PcmCaptureSession.STOP_DEADLINE_MS)
+        session?.stop()
         detectors.close(timeoutMs = leftMs())
         wakeGate.close(timeoutMs = leftMs())
     }

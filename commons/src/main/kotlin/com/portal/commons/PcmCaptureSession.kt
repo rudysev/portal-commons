@@ -11,7 +11,7 @@ import kotlin.concurrent.withLock
  * **without ever hanging**. The Android `AudioRecord` lives behind [PcmDevice], so this concurrency
  * contract is pure JVM and unit-tested with a fake device.
  *
- * Callbacks ([onFrame], [onStarted], [onLost], [onReadError]) and [log] all run on the capture thread — keep them
+ * Callbacks ([onFrame], [onStarted], [onLost]) and [log] all run on the capture thread — keep them
  * cheap and non-blocking. [start]/[stop] are driven from a controlling thread (e.g. a service's main Handler); they
  * synchronize internally, but a callback on the capture thread should not call [stop] expecting to join itself (a
  * self-[stop] just signals and returns).
@@ -25,7 +25,7 @@ import kotlin.concurrent.withLock
  * waiting for it.
  *
  * **Stop contract.** [PcmDevice.read] is non-blocking, so the loop observes `running == false` within one
- * poll interval and exits on its own; [stop] sets the flag and joins within a bounded [stopTimeoutMs]. On the
+ * poll interval and exits on its own; [stop] sets the flag and joins within a bounded [STOP_DEADLINE_MS]. On the
  * normal path the loop's `finally` releases the device, so the device is touched only on the capture thread.
  * If the thread doesn't exit in time (it overran the join inside a callback, or a native call hung), [stop]
  * force-releases the device as a last resort (on a helper thread, so [stop] stays bounded) so the mic slot can't
@@ -49,24 +49,53 @@ import kotlin.concurrent.withLock
  * Portal+ gen1), so there is no tolerance band. The window is counted in samples, not on a clock, and starts again
  * at every start, every rebuild and every non-zero sample.
  */
-// The constructor is the whole configuration surface: everything after device/onFrame is an optional callback or
-// tuning knob with a default, and the apps pass them by name. A parameter object would only move the same list.
+// The constructors are the whole configuration surface: the public one's parameters after device/onFrame are optional
+// callbacks or policies with a default, and the apps pass them by name. A parameter object would only move the same
+// list.
 @Suppress("LongParameterList")
-class PcmCaptureSession(
+class PcmCaptureSession internal constructor(
     private val device: PcmDevice,
     private val onFrame: (buf: ByteArray, n: Int) -> Unit,
     private val onStarted: () -> Unit = {},
     private val onLost: (CaptureLoss) -> Unit = {},
-    private val onReadError: (consecutiveFailures: Int) -> Unit = {},
     private val log: (message: String) -> Unit = {},
     private val threadName: String = "pcm-capture",
     private val rebuildAfterReadFailures: Int? = null,
-    private val stopTimeoutMs: Long = STOP_DEADLINE_MS,
-    private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
-    private val pollMs: Long = DEFAULT_READ_POLL_MS,
     private val idleRebuildMs: Long? = null,
     private val silenceWindowMs: Long? = null,
+    // Test timing, not policy: required here so a call that leaves it out picks the public constructor.
+    private val pollMs: Long,
+    private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
+    private val stopTimeoutMs: Long = STOP_DEADLINE_MS,
 ) {
+    /**
+     * The production surface: the device, the callbacks and the three capture policies. Read polling, read-error
+     * backoff and the [stop] timeout use [DEFAULT_READ_POLL_MS], [DEFAULT_READ_ERROR_BACKOFF_MS] and
+     * [STOP_DEADLINE_MS].
+     */
+    constructor(
+        device: PcmDevice,
+        onFrame: (buf: ByteArray, n: Int) -> Unit,
+        onStarted: () -> Unit = {},
+        onLost: (CaptureLoss) -> Unit = {},
+        log: (message: String) -> Unit = {},
+        threadName: String = "pcm-capture",
+        rebuildAfterReadFailures: Int? = null,
+        idleRebuildMs: Long? = null,
+        silenceWindowMs: Long? = null,
+    ) : this(
+        device = device,
+        onFrame = onFrame,
+        onStarted = onStarted,
+        onLost = onLost,
+        log = log,
+        threadName = threadName,
+        rebuildAfterReadFailures = rebuildAfterReadFailures,
+        idleRebuildMs = idleRebuildMs,
+        silenceWindowMs = silenceWindowMs,
+        pollMs = DEFAULT_READ_POLL_MS,
+    )
+
     // Guards the compound (used, running, thread) state across the controlling thread(s) and the capture thread's
     // end. `running` is also @Volatile so the hot read loop can poll it without taking the lock, and `thread` so a
     // stop() that gave up waiting for the lock still sees it.
@@ -96,23 +125,23 @@ class PcmCaptureSession(
     }
 
     /**
-     * Stop and free the mic, guaranteed not to hang: returns within [timeoutMs]. Sets `running = false` and joins the
-     * capture thread; the loop observes the flag within one poll and its `finally` releases the device — so on the
-     * normal path the device is touched only on the capture thread. If the thread is still alive near the end of
-     * [timeoutMs] (it overran the join inside a callback, or a native open/stop/release hung), this force-releases the
-     * device as a last resort so the mic slot can't stay held. Safe from any thread; a self-[stop] from the capture
-     * thread just signals and returns (the loop's own teardown releases the device). It ends the session: a later
-     * [start] is a no-op. An [onLost] already in progress counts against the same deadline: a slow one runs on past
-     * it, like any other callback that overruns the join.
+     * Stop and free the mic, guaranteed not to hang: returns within [STOP_DEADLINE_MS]. Sets `running = false` and
+     * joins the capture thread; the loop observes the flag within one poll and its `finally` releases the device — so
+     * on the normal path the device is touched only on the capture thread. If the thread is still alive near the end
+     * of that deadline (it overran the join inside a callback, or a native open/stop/release hung), this
+     * force-releases the device as a last resort so the mic slot can't stay held. Safe from any thread; a self-[stop]
+     * from the capture thread just signals and returns (the loop's own teardown releases the device). It ends the
+     * session: a later [start] is a no-op. An [onLost] already in progress counts against the same deadline: a slow
+     * one runs on past it, like any other callback that overruns the join.
      *
      * **Trade-off.** The force-release runs on a short-lived helper thread, and the join leaves it the last
-     * [FORCE_RELEASE_GRACE_MS] of [timeoutMs] (at most half). So the mic slot is free when this returns whenever the
+     * [FORCE_RELEASE_GRACE_MS] of the deadline (at most half). So the mic slot is free when this returns whenever the
      * release itself is quick; if the native release hangs too, this still returns on time and the slot frees only
      * when that release returns, on the helper thread. A bounded stop is worth more than a held caller: on the main
      * thread an unbounded one is an ANR.
      */
-    fun stop(timeoutMs: Long = stopTimeoutMs) {
-        val totalMs = timeoutMs.coerceAtLeast(1)
+    fun stop() {
+        val totalMs = stopTimeoutMs.coerceAtLeast(1)
         val graceMs = minOf(FORCE_RELEASE_GRACE_MS, totalMs / 2)
         val joinDeadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(totalMs - graceMs)
         val t = if (lockBefore(joinDeadlineNs)) {
@@ -328,7 +357,7 @@ class PcmCaptureSession(
         /** n < 0: a real device error. False ends the capture (a failed rebuild). */
         private fun onDeviceError(): Boolean {
             off = 0 // discard any partial frame to avoid splicing audio
-            onReadError(++readFails)
+            readFails++
             val rebuildAfter = rebuildAfterReadFailures
             if (rebuildAfter != null && readFails >= rebuildAfter) return rebuild("read failing")
             if (readErrorBackoffMs > 0 && running) Thread.sleep(readErrorBackoffMs)
@@ -353,13 +382,13 @@ class PcmCaptureSession(
 
     companion object {
         /**
-         * The one bound on stopping capture: [stop]'s whole wait (join plus force-release) by default, and the
+         * The one bound on stopping capture: [stop]'s whole wait (join plus force-release), and the
          * shared deadline of `WakeMicEngine.close()`'s waits (not of the detector close that follows them).
          */
         const val STOP_DEADLINE_MS = 400L
         const val DEFAULT_READ_ERROR_BACKOFF_MS = 20L
 
-        /** The part of [stop]'s timeout left for a force-release once the join gives up (at most half of it). */
+        /** The part of [stop]'s deadline left for a force-release once the join gives up (at most half of it). */
         const val FORCE_RELEASE_GRACE_MS = 50L
 
         // Sleep between non-blocking reads when no data is buffered yet. At 32 B/ms this wakes ~50×/s
