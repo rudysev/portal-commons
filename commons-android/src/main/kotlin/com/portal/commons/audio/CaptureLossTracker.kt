@@ -1,7 +1,7 @@
 package com.portal.commons.audio
 
 /**
- * Translates the capture session's open-failure, error and stopped signals into at most one [CaptureLoss] per
+ * Translates the capture session's open-failure, error, silenced and stopped signals into at most one [CaptureLoss] per
  * [WakeMicEngine.start], reported only while capture is wanted and only for the current capture generation.
  *
  * Each capture run (one capture thread) claims the generation that is current at its first signal and keeps it,
@@ -14,7 +14,7 @@ internal class CaptureLossTracker(
 ) {
     private class Run(val generation: Long) {
         var started = false
-        var error: String? = null
+        var end: CaptureLoss? = null // why the started run is about to end, when it knows
     }
 
     private val lock = Any()
@@ -52,16 +52,21 @@ internal class CaptureLossTracker(
     fun runError(message: String) {
         val current = currentRun()
         if (current.started) {
-            current.error = message
+            current.end = CaptureLoss.Dropped(message)
         } else {
             raise(current.generation, CaptureLoss.NotGranted(message))
         }
     }
 
+    /** Capture thread: the run is ending because it delivered only digital silence for its window. */
+    fun runSilenced(reason: String) {
+        currentRun().end = CaptureLoss.Silenced(reason)
+    }
+
     /** Capture thread: the run ended. A run that never started was stopped while opening, which a pause asks for. */
     fun runStopped() {
         val current = run.get()?.takeIf { it.started } ?: return
-        raise(current.generation, CaptureLoss.Dropped(current.error ?: "capture ended unexpectedly"))
+        raise(current.generation, current.end ?: CaptureLoss.Dropped("capture ended unexpectedly"))
     }
 
     private fun raise(raisedIn: Long, loss: CaptureLoss) {

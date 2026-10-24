@@ -8,7 +8,7 @@ import java.util.concurrent.TimeUnit
  * **without ever hanging**. The Android `AudioRecord` lives behind [PcmDevice], so this concurrency
  * contract is pure JVM and unit-tested with a fake device.
  *
- * Callbacks ([onFrame], [onStarted], [onError], [onReadError], [onStopped]) and [log] all run on the
+ * Callbacks ([onFrame], [onStarted], [onError], [onReadError], [onSilenced], [onStopped]) and [log] all run on the
  * capture thread — keep them cheap and non-blocking. [start]/[stop] are driven from a controlling thread
  * (e.g. a service's main Handler); they synchronize internally, but a callback on the capture thread
  * should not call [stop] expecting to join itself (a self-[stop] just signals and returns).
@@ -38,6 +38,12 @@ import java.util.concurrent.TimeUnit
  * a sub-frame trickle, or partials interleaved with sub-threshold errors (none of which the `< 0` path sees),
  * so a consumer can't go silently deaf. The idle clock is monotonic ([System.nanoTime]) so a wall-clock jump
  * can't false-fire it. Both are transient mic-loss recovery (the always-listening apps opt in).
+ *
+ * **Silence.** With [silenceWindowMs] set, a capture that delivers that much audio of exact-zero samples in a row
+ * fires [onSilenced] and ends, with no rebuild: a silence the system imposes (a denied app-op, a silenced background
+ * client) survives a reopen. Real mics never produce exact zeros for that long, even in a quiet room (checked on
+ * Portal+ gen1), so there is no tolerance band. The window is counted in samples, not on a clock, and starts again
+ * at every start, every rebuild and every non-zero sample.
  */
 // The constructor is the whole configuration surface: everything after device/onFrame is an optional callback or
 // tuning knob with a default, and the apps pass them by name. A parameter object would only move the same list.
@@ -56,6 +62,8 @@ class PcmCaptureSession(
     private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
     private val pollMs: Long = DEFAULT_READ_POLL_MS,
     private val idleRebuildMs: Long? = null,
+    private val silenceWindowMs: Long? = null,
+    private val onSilenced: (reason: String) -> Unit = {},
 ) {
     // Guards the compound (running, thread) state across the controlling thread(s) and the capture thread's
     // finally. `running` is also @Volatile so the hot read loop can poll it without taking the lock.
@@ -198,6 +206,10 @@ class PcmCaptureSession(
         private var lastFrameNs = System.nanoTime()
         private var readFails = 0
 
+        // Consecutive exact-zero samples delivered, against the silence window counted in samples of audio.
+        private var zeroSamples = 0L
+        private val silenceSamples = silenceWindowMs?.let { it * PcmCaptureFormat.SAMPLE_RATE / MS_PER_SECOND }
+
         /** Read until [stop] or a failed rebuild. */
         fun run() {
             var keepReading = true
@@ -223,10 +235,7 @@ class PcmCaptureSession(
                         System.nanoTime() - lastFrameNs >= TimeUnit.MILLISECONDS.toNanos(idleRebuildMs) ->
                         rebuild("no frame for ${idleRebuildMs}ms")
 
-                    n > 0 -> {
-                        onData(n)
-                        true
-                    }
+                    n > 0 -> onData(n)
 
                     n == 0 -> {
                         // No data right now — NORMAL for a non-blocking read, not a failure (does not touch
@@ -240,16 +249,44 @@ class PcmCaptureSession(
                 }
         }
 
-        private fun onData(n: Int) {
+        /** n > 0: assemble, and deliver a completed frame. False ends the capture (the silence window ran out). */
+        private fun onData(n: Int): Boolean {
             readFails = 0
             off += n
             // length is capped at the remaining bytes, so off lands exactly here
-            if (off == PcmCaptureFormat.FRAME_BYTES) {
-                onFrame(buf, PcmCaptureFormat.FRAME_BYTES)
-                off = 0
-                lastFrameNs = System.nanoTime()
+            if (off != PcmCaptureFormat.FRAME_BYTES) return true // partial frame — drain whatever else is buffered
+            onFrame(buf, PcmCaptureFormat.FRAME_BYTES)
+            off = 0
+            lastFrameNs = System.nanoTime()
+            return !silenced()
+        }
+
+        /**
+         * Counts the frame just delivered against the silence window; true (and [onSilenced]) once it is full. A stop
+         * that landed during the frame gets no [onSilenced]: a stopping session delivers no further callback.
+         */
+        private fun silenced(): Boolean {
+            val window = silenceSamples ?: return false
+            zeroSamples = trailingZeroSamples(zeroSamples)
+            val full = zeroSamples >= window && running
+            if (full) {
+                val reason = "digital silence for ${silenceWindowMs}ms"
+                log("pcm $reason → ending capture")
+                onSilenced(reason)
             }
-            // else: partial frame — loop again immediately to drain whatever else is buffered
+            return full
+        }
+
+        // The zero run after this frame: it grows by the whole frame if the frame is all zeros, else it is the
+        // frame's own trailing zeros.
+        private fun trailingZeroSamples(runBefore: Long): Long {
+            var i = PcmCaptureFormat.FRAME_BYTES - PcmCaptureFormat.BYTES_PER_SAMPLE
+            var trailing = 0L
+            while (i >= 0 && buf[i] == ZERO && buf[i + 1] == ZERO) {
+                trailing++
+                i -= PcmCaptureFormat.BYTES_PER_SAMPLE
+            }
+            return if (i < 0) runBefore + trailing else trailing
         }
 
         /** n < 0: a real device error. False ends the capture (a failed rebuild). */
@@ -270,6 +307,7 @@ class PcmCaptureSession(
                 off = 0
                 readFails = 0
                 lastFrameNs = System.nanoTime() // fresh device — restart the idle clock
+                zeroSamples = 0 // and the silence window
             } else {
                 onError("microphone unavailable on rebuild")
             }
@@ -297,5 +335,15 @@ class PcmCaptureSession(
         // Recommended idleRebuildMs for an always-listening consumer: ~20× FRAME_MS, so healthy continuous
         // capture never idles this long — only a stolen/half-dead mic does.
         const val DEFAULT_IDLE_REBUILD_MS = 2_000L
+
+        /**
+         * The silence window an always-listening consumer uses: this much audio of exact-zero samples ends capture
+         * as silenced. Equal to [DEFAULT_IDLE_REBUILD_MS], so no frames and only zeros both end within the same time.
+         * A consumer that paces retries reads it to know how long a silenced retry runs before it can fail.
+         */
+        const val DEFAULT_SILENCE_WINDOW_MS = DEFAULT_IDLE_REBUILD_MS
+
+        private const val MS_PER_SECOND = 1_000L
+        private const val ZERO: Byte = 0
     }
 }

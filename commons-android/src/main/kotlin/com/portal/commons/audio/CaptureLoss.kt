@@ -12,4 +12,7 @@ sealed interface CaptureLoss {
 
     /** Dropped: capture was running and died. */
     data class Dropped(override val reason: String) : CaptureLoss
+
+    /** Silenced: capture was running but delivered only digital silence, so it was ended. */
+    data class Silenced(override val reason: String) : CaptureLoss
 }
