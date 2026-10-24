@@ -19,6 +19,7 @@ must touch the Android SDK (the mic `AudioRecord` wrapper). `:commons-android` d
 | `PcmCaptureFormat` | The single source of truth for the capture shape (16 kHz mono 16-bit, `BYTES_PER_SAMPLE`, derived `FRAME_BYTES`) that capture, level math, and the Android seam all key off. |
 | `PcmLevel` | RMS / level math for little-endian 16-bit mono PCM. Powers the recording-level indicator (`normalized`); `rms` exposes the raw amplitude for any other level check. Pure, fully tested. |
 | `WakeMatcher` / `WakeWord` | Pure wake-decision logic and phrase model (`com.portal.commons.audio`). |
+| `CaptureLoss` | A **capture loss** (see `GLOSSARY.md`): `NotGranted`, `Dropped` or `Silenced`, each with a `reason` for the log (`com.portal.commons.audio`). Reported by `PcmCaptureSession`'s `onLost`; delivered through `WakeMicConfig.onCaptureLost`. |
 
 All package `com.portal.commons`.
 
@@ -28,7 +29,6 @@ All package `com.portal.commons`.
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
 | `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (one window after any wake: no detector is fed frames and every further wake, whatever its wake id, is dropped; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). `start()` / `pause()` / `close()`: see below. |
-| `CaptureLoss` | A **capture loss** (see `GLOSSARY.md`): `NotGranted`, `Dropped` or `Silenced`, each with a `reason` for the log. Delivered through `WakeMicConfig.onCaptureLost`. |
 | `WakeDetector` | Recognition seam the engine drives (frames in; wake / ready / unavailable / diagnostic events out). Detectors never see the handoff cooldown: the engine just withholds frames. Never two calls at once, and never closed mid-call. |
 | `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
 

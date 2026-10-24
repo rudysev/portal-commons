@@ -1,6 +1,9 @@
 package com.portal.commons
 
+import com.portal.commons.audio.CaptureLoss
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Owns the microphone-capture lifecycle shared by consuming apps: a single capture thread that opens a
@@ -8,10 +11,18 @@ import java.util.concurrent.TimeUnit
  * **without ever hanging**. The Android `AudioRecord` lives behind [PcmDevice], so this concurrency
  * contract is pure JVM and unit-tested with a fake device.
  *
- * Callbacks ([onFrame], [onStarted], [onError], [onReadError], [onSilenced], [onStopped]) and [log] all run on the
- * capture thread — keep them cheap and non-blocking. [start]/[stop] are driven from a controlling thread
- * (e.g. a service's main Handler); they synchronize internally, but a callback on the capture thread
- * should not call [stop] expecting to join itself (a self-[stop] just signals and returns).
+ * Callbacks ([onFrame], [onStarted], [onLost], [onReadError]) and [log] all run on the capture thread — keep them
+ * cheap and non-blocking. [start]/[stop] are driven from a controlling thread (e.g. a service's main Handler); they
+ * synchronize internally, but a callback on the capture thread should not call [stop] expecting to join itself (a
+ * self-[stop] just signals and returns).
+ *
+ * **Capture loss.** A capture that ends without being asked to reports why through [onLost], once per [start]: the
+ * device would not open when capture started ([CaptureLoss.NotGranted]); a rebuild's reopen failed, or an exception
+ * escaped the read loop ([CaptureLoss.Dropped]); the silence window filled ([CaptureLoss.Silenced]). A requested
+ * [stop], including one that lands while the device is still opening, reports nothing: [onLost] never runs once
+ * [stop] has been called. The check and the call run under the session lock, and [stop] waits for that lock only
+ * within its deadline: past it, an [onLost] already in progress began before the stop, and [stop] returns without
+ * waiting for it.
  *
  * **Stop contract.** [PcmDevice.read] is non-blocking, so the loop observes `running == false` within one
  * poll interval and exits on its own; [stop] sets the flag and joins within a bounded [stopTimeoutMs]. On the
@@ -26,11 +37,10 @@ import java.util.concurrent.TimeUnit
  * is the caller's job and is trivial: **discard this session and build a fresh one** (a new device, a new
  * thread, no shared mutable state with the wedged one). Keeping recovery out here is what lets this class
  * stay a simple single-lifecycle mechanism; the wedged thread, once it unblocks, sees `running == false`
- * and exits delivering no further frame (it is never revived — the fresh capture is a new instance). Its
- * `finally` still fires [onStopped], so a caller that reuses callbacks across a discard+rebuild should drop
- * that stale stop (e.g. by gating on the current session). And if the thread overran the join *inside* a
- * callback, it is still running that callback when [stop] returns — a caller that shares a consumer across the
- * rebuild must serialize it, or the fresh thread runs alongside the wedged one.
+ * and exits delivering no further frame and no [onLost] (it is never revived — the fresh capture is a new
+ * instance). And if the thread overran the join *inside* a callback, it is still running that callback when [stop]
+ * returns — a caller that shares a consumer across the rebuild must serialize it, or the fresh thread runs alongside
+ * the wedged one.
  *
  * **Rebuild.** With [rebuildAfterReadFailures] set, the session rebuilds the device (`stop` → `release` →
  * `open`) after that many consecutive read errors (`< 0`). With [idleRebuildMs] set, it *also* rebuilds when no
@@ -40,7 +50,7 @@ import java.util.concurrent.TimeUnit
  * can't false-fire it. Both are transient mic-loss recovery (the always-listening apps opt in).
  *
  * **Silence.** With [silenceWindowMs] set, a capture that delivers that much audio of exact-zero samples in a row
- * fires [onSilenced] and ends, with no rebuild: a silence the system imposes (a denied app-op, a silenced background
+ * ends as [CaptureLoss.Silenced], with no rebuild: a silence the system imposes (a denied app-op, a silenced background
  * client) survives a reopen. Real mics never produce exact zeros for that long, even in a quiet room (checked on
  * Portal+ gen1), so there is no tolerance band. The window is counted in samples, not on a clock, and starts again
  * at every start, every rebuild and every non-zero sample.
@@ -52,8 +62,7 @@ class PcmCaptureSession(
     private val device: PcmDevice,
     private val onFrame: (buf: ByteArray, n: Int) -> Unit,
     private val onStarted: () -> Unit = {},
-    private val onError: (message: String) -> Unit = {},
-    private val onStopped: () -> Unit = {},
+    private val onLost: (CaptureLoss) -> Unit = {},
     private val onReadError: (consecutiveFailures: Int) -> Unit = {},
     private val log: (message: String) -> Unit = {},
     private val threadName: String = "pcm-capture",
@@ -63,23 +72,24 @@ class PcmCaptureSession(
     private val pollMs: Long = DEFAULT_READ_POLL_MS,
     private val idleRebuildMs: Long? = null,
     private val silenceWindowMs: Long? = null,
-    private val onSilenced: (reason: String) -> Unit = {},
 ) {
     // Guards the compound (running, thread) state across the controlling thread(s) and the capture thread's
-    // finally. `running` is also @Volatile so the hot read loop can poll it without taking the lock.
-    private val lock = Any()
+    // finally. `running` is also @Volatile so the hot read loop can poll it without taking the lock, and `thread` so a
+    // stop() that gave up waiting for the lock still sees it.
+    private val lock = ReentrantLock()
 
     @Volatile private var running = false
-    private var thread: Thread? = null
+
+    @Volatile private var thread: Thread? = null
 
     /**
      * Start capturing. Returns **false only** when refused because a previous capture thread is still alive
      * (a zombie from a [stop] that timed out) — we never run two readers on the one mic slot. Otherwise
      * returns true, meaning the capture thread was started (or was already running): capture begins
-     * asynchronously, and a failure to acquire the mic surfaces via [onError], not the return value.
+     * asynchronously, and a failure to acquire the mic surfaces via [onLost], not the return value.
      * Idempotent.
      */
-    fun start(): Boolean = synchronized(lock) {
+    fun start(): Boolean = lock.withLock {
         if (running) return true
         val prev = thread
         if (prev != null && prev.isAlive) {
@@ -98,7 +108,9 @@ class PcmCaptureSession(
      * [timeoutMs] (it overran the join inside a callback, or a native open/stop/release hung), this force-releases the
      * device as a last resort so the mic slot can't stay held, and keeps the thread reference set so a later [start]
      * refuses rather than running two readers on the one slot. Safe from any thread; a self-[stop] from the capture
-     * thread just signals and returns (the loop's own teardown releases and clears the thread reference).
+     * thread just signals and returns (the loop's own teardown releases and clears the thread reference). An [onLost]
+     * already in progress counts against the same deadline: a slow one runs on past it, like any other callback that
+     * overruns the join.
      *
      * **Trade-off.** The force-release runs on a short-lived helper thread, and the join leaves it the last
      * [FORCE_RELEASE_GRACE_MS] of [timeoutMs] (at most half). So the mic slot is free when this returns whenever the
@@ -107,7 +119,18 @@ class PcmCaptureSession(
      * thread an unbounded one is an ANR.
      */
     fun stop(timeoutMs: Long = stopTimeoutMs) {
-        val t = synchronized(lock) {
+        val totalMs = timeoutMs.coerceAtLeast(1)
+        val graceMs = minOf(FORCE_RELEASE_GRACE_MS, totalMs / 2)
+        val joinDeadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(totalMs - graceMs)
+        val t = if (lockBefore(joinDeadlineNs)) {
+            try {
+                running = false
+                thread
+            } finally {
+                lock.unlock()
+            }
+        } else {
+            // The capture thread has held the lock all this time: it is inside onLost, which began before this stop.
             running = false
             thread
         }
@@ -116,9 +139,8 @@ class PcmCaptureSession(
             // loop's finally clears it on the controlled path.
             return
         }
-        val totalMs = timeoutMs.coerceAtLeast(1)
-        val graceMs = minOf(FORCE_RELEASE_GRACE_MS, totalMs / 2)
-        runCatching { t.join(totalMs - graceMs) }
+        val joinMs = TimeUnit.NANOSECONDS.toMillis(joinDeadlineNs - System.nanoTime())
+        if (joinMs > 0) runCatching { t.join(joinMs) } // join(0) would wait forever
         if (t.isAlive) {
             // The capture thread didn't exit in time — it overran the join inside a callback, or a native
             // open/stop/release hung. Force-release the device so the mic slot can't stay held, and keep
@@ -127,6 +149,23 @@ class PcmCaptureSession(
             forceRelease(graceMs)
         }
         // if it exited, the loop's finally already cleared `thread` under the lock
+    }
+
+    // Takes the lock if it frees up before deadlineNs. Not interruptible, like the join's bound: an interrupt is kept
+    // for the caller.
+    private fun lockBefore(deadlineNs: Long): Boolean {
+        var interrupted = false
+        try {
+            while (true) {
+                try {
+                    return lock.tryLock(deadlineNs - System.nanoTime(), TimeUnit.NANOSECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
     }
 
     // On a helper thread, so a release that hangs in native code holds that thread, not the caller.
@@ -145,9 +184,8 @@ class PcmCaptureSession(
     /**
      * Tear down and reopen the device after a fault (a read-error run, or the idle watchdog). A member
      * function, so it closes over none of the loop's mutable locals. Returns true if the device reopened;
-     * false means [PcmDevice.open] failed and the caller should fire [onError] and break (the consumer
-     * recovers by discarding this session). Callers guard `running` before calling so a stop() in flight
-     * doesn't reopen a device that's about to be torn down.
+     * false means [PcmDevice.open] failed and the capture ends as [CaptureLoss.Dropped]. Callers guard `running`
+     * before calling so a stop() in flight doesn't reopen a device that's about to be torn down.
      */
     private fun rebuildDevice(reason: String): Boolean {
         log("pcm $reason → rebuilding device")
@@ -159,38 +197,46 @@ class PcmCaptureSession(
     private fun loop() {
         if (!runCatching { device.open() }.getOrDefault(false)) {
             log("pcm open failed")
-            synchronized(lock) {
-                running = false
-                if (thread == Thread.currentThread()) thread = null
-            }
-            onError("microphone unavailable")
+            end(CaptureLoss.NotGranted("microphone unavailable"))
             return
         }
         // Built before onStarted(), so the idle clock starts when the device opened.
         val capture = CaptureLoop()
         log("pcm capture started")
+        var loss: CaptureLoss? = null
         try {
             // A stop() that landed while open() was in flight must not start the consumer either: on gen2 a stopped
             // session's onStarted ran Vosk's reset + warm-up past the stop join, alongside the rebuilt session.
             if (running) onStarted()
-            capture.run()
+            loss = capture.run()
         } catch (
             // Last line of defence on the capture thread: anything escaping here would be an uncaught exception on
-            // a background thread, which kills the host app's process. Log it; the finally still frees the mic.
+            // a background thread, which kills the host app's process. Log it and report it; the finally still
+            // frees the mic.
             @Suppress("TooGenericExceptionCaught")
             e: Throwable,
         ) {
             log("pcm capture EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
+            loss = CaptureLoss.Dropped("capture ended unexpectedly: ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             runCatching { device.stop() }
             runCatching { device.release() }
-            synchronized(lock) {
-                running = false
-                // Only clear if we're still the active thread — never clobber a thread a newer start() set.
-                if (thread == Thread.currentThread()) thread = null
-            }
             log("pcm capture stopped")
-            onStopped()
+            end(loss)
+        }
+    }
+
+    /**
+     * Ends this capture thread's run: reports [loss] unless [stop] was called, then gives up the session. Under the
+     * lock [stop] takes, so a [stop] lands either before the check (and nothing is reported) or after [onLost] began.
+     */
+    private fun end(loss: CaptureLoss?) = lock.withLock {
+        try {
+            if (running && loss != null) onLost(loss)
+        } finally {
+            running = false
+            // Only clear if we're still the active thread — never clobber a thread a newer start() set.
+            if (thread == Thread.currentThread()) thread = null
         }
     }
 
@@ -210,10 +256,14 @@ class PcmCaptureSession(
         private var zeroSamples = 0L
         private val silenceSamples = silenceWindowMs?.let { it * PcmCaptureFormat.SAMPLE_RATE / MS_PER_SECOND }
 
-        /** Read until [stop] or a failed rebuild. */
-        fun run() {
+        // Why the capture is ending, once it knows: set where a step returns false for anything but a stop.
+        private var loss: CaptureLoss? = null
+
+        /** Read until [stop] or a capture loss. Returns that loss, or null for a stop. */
+        fun run(): CaptureLoss? {
             var keepReading = true
             while (keepReading && running) keepReading = step()
+            return loss
         }
 
         /** One non-blocking read and its handling. False ends the capture. */
@@ -262,8 +312,8 @@ class PcmCaptureSession(
         }
 
         /**
-         * Counts the frame just delivered against the silence window; true (and [onSilenced]) once it is full. A stop
-         * that landed during the frame gets no [onSilenced]: a stopping session delivers no further callback.
+         * Counts the frame just delivered against the silence window; true (and a [CaptureLoss.Silenced]) once it is
+         * full. A stop that landed during the frame is no loss: a stopping session delivers no further callback.
          */
         private fun silenced(): Boolean {
             val window = silenceSamples ?: return false
@@ -272,7 +322,7 @@ class PcmCaptureSession(
             if (full) {
                 val reason = "digital silence for ${silenceWindowMs}ms"
                 log("pcm $reason → ending capture")
-                onSilenced(reason)
+                loss = CaptureLoss.Silenced(reason)
             }
             return full
         }
@@ -309,7 +359,7 @@ class PcmCaptureSession(
                 lastFrameNs = System.nanoTime() // fresh device — restart the idle clock
                 zeroSamples = 0 // and the silence window
             } else {
-                onError("microphone unavailable on rebuild")
+                loss = CaptureLoss.Dropped("microphone unavailable on rebuild")
             }
             return reopened
         }
