@@ -4,7 +4,6 @@ import android.content.Context
 import com.portal.commons.PcmCaptureSession
 import com.portal.commons.PcmDevice
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -40,12 +39,15 @@ import java.util.concurrent.atomic.AtomicReference
  * first.
  *
  * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
+ *
+ * The capture lifecycle (sessions, detector access, the closed state, the bounded close) lives in [CaptureRequests];
+ * this class keeps the wake policy: the handoff cooldown, the wake-word hot-swap and the routing of detector events.
  */
 class WakeMicEngine internal constructor(
     context: Context,
     private val config: WakeMicConfig,
-    private val newDevice: () -> PcmDevice,
-    private val postToMain: (Runnable) -> Unit,
+    newDevice: () -> PcmDevice,
+    postToMain: (Runnable) -> Unit,
     // Monotonic milliseconds, so a wall-clock jump can't hold the handoff cooldown open and leave the engine deaf.
     private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
 ) {
@@ -58,21 +60,62 @@ class WakeMicEngine internal constructor(
 
     private fun inHandoffCooldown(nowMs: Long = clock()): Boolean = nowMs < handoffCooldownUntilMs
 
-    // Terminal: set once by close(). Checked when a posted callback runs, not when it is posted, so a callback
-    // already queued when close() runs never reaches the consumer.
-    private val closed = AtomicBoolean(false)
+    // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
+    // the read and the clear is never lost.
+    private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
 
-    private fun deliverOnMain(callback: () -> Unit) = postToMain { if (!closed.get()) callback() }
+    // The wake policy run on the capture thread (and the start() hook, on the caller's). CaptureRequests runs it only
+    // for the current capture request, only while open, and never alongside another detector call.
+    private val capture = object : CaptureRequests.Capture {
+        override fun beforeMicAcquire() = config.beforeMicAcquire()
 
-    private val detectorEvents = object : WakeDetector.Events {
+        override fun onStarted(detectors: List<WakeDetector>) {
+            handoffCooldownUntilMs = Long.MIN_VALUE
+            detectors.forEach { it.start() }
+        }
+
+        override fun onFrame(detectors: List<WakeDetector>, buf: ByteArray, n: Int) {
+            applyPendingWakeWords(detectors)
+            // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just
+            // fired on.
+            for (detector in detectors) {
+                if (inHandoffCooldown()) return
+                detector.accept(buf, n)
+            }
+        }
+
+        override fun onLost(loss: CaptureLoss) {
+            config.log("capture lost (${loss.javaClass.simpleName}): ${loss.reason}")
+            config.onCaptureLost(loss)
+        }
+    }
+
+    // Last among the fields its detectors' events read: a detector may raise one while it is being created.
+    private val requests = CaptureRequests(
+        newDevice = newDevice,
+        postToMain = postToMain,
+        log = config.log,
+        rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
+        capture = capture,
+    ) { delivery ->
+        val host = object : WakeDetector.Host {
+            override val context: Context = context
+            override val wakeWords: List<WakeWord> = config.wakeWords
+            override val events: WakeDetector.Events = DetectorEvents(delivery)
+        }
+        config.detectors.map { it.create(host) }
+    }
+
+    /** Routes [WakeDetector.Events] to the consumer, delivering through [delivery], the engine's [requests]. */
+    private inner class DetectorEvents(private val delivery: CaptureRequests) : WakeDetector.Events {
         override fun onReady(detectorId: String) {
             config.log("wake detector ready ($detectorId)")
-            deliverOnMain { config.onDetectorReady(detectorId) }
+            delivery.deliverOnMain { config.onDetectorReady(detectorId) }
         }
 
         override fun onUnavailable(detectorId: String) {
             config.log("wake unavailable ($detectorId) — detector idle")
-            deliverOnMain { config.onDetectorUnavailable(detectorId) }
+            delivery.deliverOnMain { config.onDetectorUnavailable(detectorId) }
         }
 
         override fun onWake(event: WakeEvent) {
@@ -83,49 +126,13 @@ class WakeMicEngine internal constructor(
             }
             handoffCooldownUntilMs = nowMs + config.wakeHandoffCooldownMs
             config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
-            // Raised from inside accept, so the capture thread holds the detector lock. close() sets closed before it
-            // waits for that lock: a wake past this check is one close() waits for (or gives up on, already begun).
-            if (closed.get()) {
+            if (!delivery.deliverWake { config.onWake(event) }) {
                 config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
-                return
             }
-            config.onWake(event)
         }
 
         override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
     }
-
-    private val detectorHost = object : WakeDetector.Host {
-        override val context: Context = context
-        override val wakeWords: List<WakeWord> = config.wakeWords
-        override val events: WakeDetector.Events = detectorEvents
-    }
-
-    private val detectors = SerializedDetectors(config.detectors.map { it.create(detectorHost) }, config.log)
-
-    // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
-    // the read and the clear is never lost.
-    private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
-
-    private val requests = CaptureRequests(post = ::deliverOnMain) { loss ->
-        config.log("capture lost (${loss.javaClass.simpleName}): ${loss.reason}")
-        config.onCaptureLost(loss)
-    }
-
-    // The session of the newest capture request; null until the first start().
-    @Volatile private var session: PcmCaptureSession? = null
-
-    private fun newSession(request: CaptureRequests.CaptureRequest) = PcmCaptureSession(
-        device = newDevice(),
-        onFrame = { buf, n -> onFrame(request, buf, n) },
-        onStarted = { onStarted(request) },
-        onLost = request::lost,
-        log = config.log,
-        threadName = "wake-capture",
-        rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
-        idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
-        silenceWindowMs = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS,
-    )
 
     /**
      * Begins a capture request and acquires the mic on a fresh session and device, running
@@ -134,16 +141,7 @@ class WakeMicEngine internal constructor(
      * reports no loss. During an open capture request that has raised no loss it keeps the current capture (a loss
      * that capture raises later is still reported). A logged no-op after [close].
      */
-    fun start() {
-        if (ignoredAfterClose("start()")) return
-        config.beforeMicAcquire()
-        val request = requests.begin()
-        if (request == null) {
-            config.log("start() during an open capture request — keeping the current capture")
-            return
-        }
-        session = newSession(request).also { it.start() }
-    }
+    fun start() = requests.begin()
 
     /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
     fun updateWakeWords(words: List<WakeWord>) {
@@ -154,15 +152,7 @@ class WakeMicEngine internal constructor(
      * Ends the capture request and yields the mic slot. Reports no capture loss, and cancels one already posted but
      * not yet delivered. A harmless no-op after a loss; a logged no-op after [close].
      */
-    fun pause() {
-        if (ignoredAfterClose("pause()")) return
-        requests.end()
-        session?.stop()
-        config.log("mic paused (yielded slot)")
-    }
-
-    private fun ignoredAfterClose(call: String): Boolean =
-        closed.get().also { if (it) config.log("$call after close() ignored") }
+    fun pause() = requests.end()
 
     /**
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
@@ -179,31 +169,7 @@ class WakeMicEngine internal constructor(
      * the deadline's waits, however long it takes. Freeing the Vosk model alone takes ~0.5 s on Portal+ gen1, so a
      * close from the main thread usually blocks it past the deadline.
      */
-    fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        val deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PcmCaptureSession.STOP_DEADLINE_MS)
-        val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
-        session?.stop()
-        detectors.close(timeoutMs = leftMs())
-    }
-
-    // A wedged session's thread may still call back once it unblocks; only the current capture request's session
-    // reaches the detectors.
-    private fun onStarted(request: CaptureRequests.CaptureRequest) = detectors.use { all ->
-        if (!request.isCurrent) return@use
-        handoffCooldownUntilMs = Long.MIN_VALUE
-        all.forEach { it.start() }
-    }
-
-    private fun onFrame(request: CaptureRequests.CaptureRequest, buf: ByteArray, n: Int) = detectors.use { all ->
-        if (!request.isCurrent) return@use
-        applyPendingWakeWords(all)
-        // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just fired on.
-        for (detector in all) {
-            if (inHandoffCooldown()) return@use
-            detector.accept(buf, n)
-        }
-    }
+    fun close() = requests.close()
 
     private fun applyPendingWakeWords(all: List<WakeDetector>) {
         val words = pendingWakeWords.getAndSet(null) ?: return
