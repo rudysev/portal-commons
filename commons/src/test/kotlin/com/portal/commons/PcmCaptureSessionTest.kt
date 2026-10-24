@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *    case (a non-blocking read never parks in production), exercising the bounded join + force-release and the
  *    post-stop "no frame after stop" gate.
  * Each test has a hard timeout so a regression (e.g. `stop()` hanging) fails the suite instead of blocking it.
- * Tests pass `pollMs = 0` so the idle path doesn't add real sleeps.
+ * Tests pass `pollMs = 0` (through the session's internal constructor) so the idle path doesn't add real sleeps.
  */
 class PcmCaptureSessionTest {
 
@@ -199,24 +199,21 @@ class PcmCaptureSessionTest {
 
     @Test(timeout = 10_000)
     fun idleZeroReturnsDoNotTripRebuild() {
-        // A non-blocking read returning 0 (no data now) is NORMAL, not a failure: it must not call onReadError
-        // nor count toward rebuildAfterReadFailures.
+        // A non-blocking read returning 0 (no data now) is NORMAL, not a failure: it must not count toward
+        // rebuildAfterReadFailures, so even a threshold of one read error never reopens the device.
         val fake = FakeDevice() // framesToServe = 0 → read returns 0 (idle)
-        val readErrors = AtomicInteger()
         val gotFrame = CountDownLatch(1)
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> gotFrame.countDown() },
-            onReadError = { readErrors.incrementAndGet() },
-            rebuildAfterReadFailures = 3,
+            rebuildAfterReadFailures = 1,
             readErrorBackoffMs = 0,
             pollMs = 0,
         )
 
         session.start()
         Thread.sleep(100) // let the loop poll the idle device many times
-        assertEquals("idle 0-returns must not be read errors", 0, readErrors.get())
-        assertEquals("idle must not rebuild", 1, fake.openCount.get())
+        assertEquals("idle 0-returns are not read errors: no rebuild", 1, fake.openCount.get())
 
         fake.framesToServe = 1 // prove the loop is still live and delivers once data arrives
         await(gotFrame)
@@ -340,12 +337,12 @@ class PcmCaptureSessionTest {
                 releaseHung.await() // a native release that hangs as well
             }
         }
-        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, pollMs = 0)
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, pollMs = 0, stopTimeoutMs = 200)
 
         session.start()
         await(capture.parked)
         val startNs = System.nanoTime()
-        session.stop(timeoutMs = 200)
+        session.stop()
         val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
 
         assertTrue("stop() took $tookMs ms", tookMs < 300)
@@ -385,12 +382,13 @@ class PcmCaptureSessionTest {
         // A live mic that returns 0 (no data) for idleRebuildMs — a stolen/half-dead slot that never errors —
         // must be recovered by a device rebuild, WITHOUT being counted as a read error.
         val fake = FakeDevice() // framesToServe = 0 → read returns 0 (idle)
-        val readErrors = AtomicInteger()
         val gotFrame = CountDownLatch(1)
+        val log = CopyOnWriteArrayList<String>()
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> gotFrame.countDown() },
-            onReadError = { readErrors.incrementAndGet() },
+            log = log::add,
+            rebuildAfterReadFailures = 1,
             idleRebuildMs = 50,
             pollMs = 0,
         )
@@ -398,7 +396,8 @@ class PcmCaptureSessionTest {
         session.start()
         await(fake.reopened) // sustained idle triggered a device rebuild (open #2)
         assertTrue("idle must rebuild the device", fake.openCount.get() >= 2)
-        assertEquals("idle 0-returns must NOT be counted as read errors", 0, readErrors.get())
+        // Every reopen is the idle watchdog's: a threshold of one read error would have reopened on any.
+        assertTrue("idle 0-returns must NOT be counted as read errors: $log", log.none { "read failing" in it })
 
         fake.framesToServe = 1 // recovery: data flows again → a frame is delivered
         await(gotFrame)
@@ -412,7 +411,7 @@ class PcmCaptureSessionTest {
         // "reset the clock on any n>0" logic would never fire here, leaving the consumer silently deaf.
         val opens = AtomicInteger()
         val reopened = CountDownLatch(1)
-        val readErrors = AtomicInteger()
+        val log = CopyOnWriteArrayList<String>()
         val device = object : PcmDevice {
             override fun open(): Boolean {
                 if (opens.incrementAndGet() >= 2) reopened.countDown()
@@ -428,14 +427,16 @@ class PcmCaptureSessionTest {
         val session = PcmCaptureSession(
             device = device,
             onFrame = { _, _ -> },
-            onReadError = { readErrors.incrementAndGet() },
+            log = log::add,
+            rebuildAfterReadFailures = 1,
             idleRebuildMs = 150,
             pollMs = 0,
         )
 
         session.start()
         await(reopened) // a trickle that never completes a frame tripped the frame-based idle watchdog → rebuild
-        assertEquals("trickle bytes (n>0) are not read errors", 0, readErrors.get())
+        // Every reopen is the idle watchdog's: a threshold of one read error would have reopened on any.
+        assertTrue("trickle bytes (n>0) are not read errors: $log", log.none { "read failing" in it })
         session.stop()
     }
 
