@@ -117,14 +117,12 @@ class WakeMicEngine internal constructor(
             device = newDevice(),
             onFrame = { buf, n -> onFrame(built, buf, n) },
             onStarted = { onStarted(built) },
-            onError = { if (session === built) losses.runError(it) },
-            onStopped = { if (session === built) losses.runStopped() },
+            onLost = { if (session === built) losses.lost(it) },
             log = config.log,
             threadName = "wake-capture",
             rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
             idleRebuildMs = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS,
             silenceWindowMs = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS,
-            onSilenced = { if (session === built) losses.runSilenced(it) },
         )
         return built
     }
@@ -198,7 +196,6 @@ class WakeMicEngine internal constructor(
     // the detectors.
     private fun onStarted(from: PcmCaptureSession) = detectors.use { all ->
         if (from !== session) return@use
-        losses.runStarted()
         handoffCooldownUntilMs = Long.MIN_VALUE
         all.forEach { it.start() }
     }

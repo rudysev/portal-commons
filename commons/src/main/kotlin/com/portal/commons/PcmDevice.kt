@@ -12,7 +12,7 @@ package com.portal.commons
  * path the device is touched only on the capture thread: [read] is non-blocking.
  */
 interface PcmDevice {
-    /** Open and start capturing. Return false if the mic couldn't be acquired (the session ends + onError). */
+    /** Open and start capturing. Return false if the mic couldn't be acquired (the session reports a capture loss). */
     fun open(): Boolean
 
     /**

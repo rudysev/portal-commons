@@ -1,5 +1,6 @@
 package com.portal.commons
 
+import com.portal.commons.audio.CaptureLoss
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,6 +25,27 @@ class PcmCaptureSessionTest {
 
     private fun await(latch: CountDownLatch) =
         assertTrue("timed out waiting for latch", latch.await(3, TimeUnit.SECONDS))
+
+    /** Every [PcmCaptureSession.onLost] it was handed; [lost] counts down at the first. */
+    private class Losses {
+        val all = CopyOnWriteArrayList<CaptureLoss>()
+        val lost = CountDownLatch(1)
+
+        fun add(loss: CaptureLoss) {
+            all.add(loss)
+            lost.countDown()
+        }
+    }
+
+    /** A log that counts [stopped] down once the capture thread has logged its end. */
+    private class StopLog(private val forward: (String) -> Unit = {}) : (String) -> Unit {
+        val stopped = CountDownLatch(1)
+
+        override fun invoke(message: String) {
+            forward(message)
+            if (message == "pcm capture stopped") stopped.countDown()
+        }
+    }
 
     /**
      * Non-blocking fake: serves [framesToServe] frames in [bytesPerRead]-byte chunks (assembled by the
@@ -119,7 +141,8 @@ class PcmCaptureSessionTest {
         val fake = FakeDevice().apply { framesToServe = 3 }
         val frames = AtomicInteger()
         val gotFrames = CountDownLatch(3)
-        val stopped = CountDownLatch(1)
+        val log = StopLog()
+        val losses = Losses()
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, n ->
@@ -127,16 +150,18 @@ class PcmCaptureSessionTest {
                 frames.incrementAndGet()
                 gotFrames.countDown()
             },
-            onStopped = { stopped.countDown() },
+            onLost = losses::add,
+            log = log,
             pollMs = 0,
         )
 
         assertTrue(session.start())
         await(gotFrames)
         session.stop()
-        await(stopped)
+        await(log.stopped)
 
         assertEquals(3, frames.get())
+        assertEquals("a requested stop is not a loss", emptyList<CaptureLoss>(), losses.all)
         assertEquals(1, fake.openCount.get())
         assertTrue(fake.releaseCount.get() >= 1)
     }
@@ -152,7 +177,7 @@ class PcmCaptureSessionTest {
             }
             val frames = AtomicInteger()
             val gotFrames = CountDownLatch(2)
-            val stopped = CountDownLatch(1)
+            val log = StopLog()
             val session = PcmCaptureSession(
                 device = fake,
                 onFrame = { _, n ->
@@ -160,13 +185,13 @@ class PcmCaptureSessionTest {
                     frames.incrementAndGet()
                     gotFrames.countDown()
                 },
-                onStopped = { stopped.countDown() },
+                log = log,
                 pollMs = 0,
             )
             session.start()
             await(gotFrames)
             session.stop()
-            await(stopped)
+            await(log.stopped)
             assertEquals(2, frames.get())
             assertTrue("assembly should take more reads than frames (chunk=$chunk)", fake.readCount.get() > 2)
         }
@@ -202,19 +227,18 @@ class PcmCaptureSessionTest {
     fun stopReturnsPromptlyWhenIdle() {
         val fake = FakeDevice() // idle: read returns 0
         val started = CountDownLatch(1)
-        val stopped = CountDownLatch(1)
+        val log = StopLog { if (it == "pcm capture started") started.countDown() }
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> },
-            onStopped = { stopped.countDown() },
-            log = { if (it == "pcm capture started") started.countDown() },
+            log = log,
             pollMs = 0,
         )
 
         session.start()
         await(started)
         session.stop() // loop sees running=false within a poll and exits; its finally releases
-        await(stopped)
+        await(log.stopped)
 
         assertTrue(fake.stopCount.get() >= 1)
         assertTrue(fake.releaseCount.get() >= 1)
@@ -224,7 +248,7 @@ class PcmCaptureSessionTest {
     fun residualPartialFrameDiscardedOnStop() {
         // A partial frame in flight when stop() lands is discarded — onFrame only ever fires on a full frame.
         val parked = CountDownLatch(1)
-        val stopped = CountDownLatch(1)
+        val log = StopLog()
         val frames = AtomicInteger()
         val device = object : PcmDevice {
             private var served = false
@@ -243,14 +267,14 @@ class PcmCaptureSessionTest {
         val session = PcmCaptureSession(
             device = device,
             onFrame = { _, _ -> frames.incrementAndGet() },
-            onStopped = { stopped.countDown() },
+            log = log,
             pollMs = 0,
         )
 
         session.start()
         await(parked) // a partial (640 B) frame is buffered; device now idle
         session.stop()
-        await(stopped)
+        await(log.stopped)
         assertEquals("a partial frame must not be delivered on stop", 0, frames.get())
     }
 
@@ -260,12 +284,14 @@ class PcmCaptureSessionTest {
         // the loop's post-read gate drops the in-flight frame. This lets a caller safely discard a stopped
         // session and start a fresh one without the old thread's onFrame racing the new one (e.g. Vosk).
         val frames = AtomicInteger()
-        val stopped = CountDownLatch(1)
+        val log = StopLog()
+        val losses = Losses()
         val fake = BlockingFake()
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> frames.incrementAndGet() },
-            onStopped = { stopped.countDown() },
+            onLost = losses::add,
+            log = log,
             stopTimeoutMs = 50,
             pollMs = 0,
         )
@@ -274,8 +300,9 @@ class PcmCaptureSessionTest {
         await(fake.parked) // thread is parked in read() (standing in for a hung native call)
         session.stop() // running=false; join times out (thread parked); returns
         fake.unpark() // read now returns a full frame — but running=false, so the gate must drop it
-        await(stopped)
+        await(log.stopped)
         assertEquals("a frame arriving as stop() lands must not be delivered", 0, frames.get())
+        assertEquals("a stop that timed out is still not a loss", emptyList<CaptureLoss>(), losses.all)
     }
 
     @Test(timeout = 10_000)
@@ -327,6 +354,32 @@ class PcmCaptureSessionTest {
         await(releaseEntered) // the force-release was still attempted
         releaseHung.countDown()
         capture.unpark()
+    }
+
+    @Test(timeout = 10_000)
+    fun stopStaysWithinItsTimeoutWhileOnLostIsRunning() {
+        // A loss reported before the stop is still reported, but a slow onLost must not hold stop() past its deadline.
+        val inOnLost = CountDownLatch(1)
+        val onLostHung = CountDownLatch(1)
+        val session = PcmCaptureSession(
+            device = FakeDevice(openResults = ArrayDeque(listOf(false))),
+            onFrame = { _, _ -> },
+            onLost = {
+                inOnLost.countDown()
+                onLostHung.await()
+            },
+            pollMs = 0,
+            stopTimeoutMs = 200,
+        )
+
+        session.start()
+        await(inOnLost)
+        val startNs = System.nanoTime()
+        session.stop()
+        val tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)
+        onLostHung.countDown()
+
+        assertTrue("stop() took $tookMs ms", tookMs < 300)
     }
 
     @Test(timeout = 10_000)
@@ -395,10 +448,11 @@ class PcmCaptureSessionTest {
         // force-release timeout, and no zombie left blocking a later start() (the mic slot stays reclaimable).
         val inRebuildOpen = CountDownLatch(1)
         val proceedOpen = CountDownLatch(1)
-        val stopped = CountDownLatch(1)
         val frames = AtomicInteger()
         val opens = AtomicInteger()
         val logs = CopyOnWriteArrayList<String>()
+        val log = StopLog { logs.add(it) }
+        val losses = Losses()
         val device = object : PcmDevice {
             override fun open(): Boolean {
                 if (opens.incrementAndGet() == 2) { // the rebuild's reopen — park it so stop() lands mid-rebuild
@@ -414,8 +468,8 @@ class PcmCaptureSessionTest {
         val session = PcmCaptureSession(
             device = device,
             onFrame = { _, _ -> frames.incrementAndGet() },
-            onStopped = { stopped.countDown() },
-            log = { logs.add(it) },
+            onLost = losses::add,
+            log = log,
             rebuildAfterReadFailures = 3,
             readErrorBackoffMs = 0,
             pollMs = 0,
@@ -427,9 +481,10 @@ class PcmCaptureSessionTest {
         Thread.sleep(50) // stop() has set running=false and is in its bounded join
         proceedOpen.countDown() // open() returns; loop continues → top gate sees running=false → exits
         stopper.join(5_000)
-        await(stopped)
+        await(log.stopped)
 
         assertEquals("no frame delivered when stop lands during a rebuild", 0, frames.get())
+        assertEquals("a stop during a rebuild is not a loss", emptyList<CaptureLoss>(), losses.all)
         assertFalse("clean exit — no force-release timeout", logs.any { it.contains("pcm stop timeout") })
         assertTrue("no zombie — start() succeeds after the rebuild-stop", session.start())
         session.stop()
@@ -503,23 +558,21 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
-    fun openFailureReportsErrorAndDoesNotRun() {
+    fun openFailureIsLostAsNotGrantedAndDoesNotRun() {
         val fake = FakeDevice(openResults = ArrayDeque(listOf(false)))
-        val error = CountDownLatch(1)
-        val stoppedCalls = AtomicInteger()
+        val losses = Losses()
         val session = PcmCaptureSession(
             device = fake,
             onFrame = { _, _ -> },
-            onError = { error.countDown() },
-            onStopped = { stoppedCalls.incrementAndGet() },
+            onLost = losses::add,
             pollMs = 0,
         )
 
         assertTrue(session.start()) // thread spawns; open() fails inside the loop
-        await(error)
-        Thread.sleep(50)
+        await(losses.lost)
+        Thread.sleep(50) // room for a second, wrong, report to arrive
 
-        assertEquals("onStopped must not fire when open never succeeded", 0, stoppedCalls.get())
+        assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses.all)
         assertEquals(0, fake.releaseCount.get())
     }
 
@@ -546,60 +599,116 @@ class PcmCaptureSessionTest {
         // Open failure: onStarted must NOT fire (it isn't "capturing").
         val badFake = FakeDevice(openResults = ArrayDeque(listOf(false)))
         val badStarted = AtomicInteger()
-        val errored = CountDownLatch(1)
+        val badLosses = Losses()
         val badSession = PcmCaptureSession(
             device = badFake,
             onFrame = { _, _ -> },
             onStarted = { badStarted.incrementAndGet() },
-            onError = { errored.countDown() },
+            onLost = badLosses::add,
             pollMs = 0,
         )
         badSession.start()
-        await(errored)
+        await(badLosses.lost)
         Thread.sleep(50)
         assertEquals("onStarted must not fire when open failed", 0, badStarted.get())
     }
 
     @Test(timeout = 10_000)
-    fun stopDuringOpenNeverFiresOnStarted() {
+    fun stopDuringOpenFiresNeitherOnStartedNorOnLost() {
         // A stop() that lands while open() is in flight must not start the consumer: onStarted is a callback like
         // any other. On gen2 a pause mid-open let the stopping thread run Vosk's reset + warm-up past the stop
-        // join, and the rebuilt session then ran the same recognizer on a second thread — a native abort.
-        val inOpen = CountDownLatch(1)
-        val proceedOpen = CountDownLatch(1)
-        val stopped = CountDownLatch(1)
-        val started = AtomicInteger()
-        val releases = AtomicInteger()
-        val device = object : PcmDevice {
-            override fun open(): Boolean {
-                inOpen.countDown()
-                proceedOpen.await()
-                return true
+        // join, and the rebuilt session then ran the same recognizer on a second thread — a native abort. Nor is it
+        // a loss, whether the open then succeeds or fails: the stop was asked for.
+        for (opened in listOf(true, false)) {
+            val inOpen = CountDownLatch(1)
+            val proceedOpen = CountDownLatch(1)
+            val log = StopLog()
+            val started = AtomicInteger()
+            val losses = Losses()
+            val releases = AtomicInteger()
+            val device = object : PcmDevice {
+                override fun open(): Boolean {
+                    inOpen.countDown()
+                    proceedOpen.await()
+                    return opened
+                }
+                override fun read(buf: ByteArray, offset: Int, length: Int) = 0
+                override fun stop() = Unit
+                override fun release() {
+                    releases.incrementAndGet()
+                }
             }
-            override fun read(buf: ByteArray, offset: Int, length: Int) = 0
-            override fun stop() = Unit
-            override fun release() {
-                releases.incrementAndGet()
+            val session = PcmCaptureSession(
+                device = device,
+                onFrame = { _, _ -> },
+                onStarted = { started.incrementAndGet() },
+                onLost = losses::add,
+                log = log,
+                pollMs = 0,
+            )
+
+            session.start()
+            await(inOpen)
+            val stopper = Thread { session.stop() }.apply { start() }
+            Thread.sleep(50) // stop() has cleared `running` and is in its bounded join
+            proceedOpen.countDown() // open() returns after the stop
+            stopper.join(5_000)
+            Thread.sleep(50) // room for a wrong callback to arrive
+
+            assertEquals("onStarted must not fire for a session stopped mid-open", 0, started.get())
+            assertEquals("a stop mid-open is not a loss (opened=$opened)", emptyList<CaptureLoss>(), losses.all)
+            if (opened) {
+                await(log.stopped)
+                assertTrue("the opened device is still released", releases.get() >= 1)
             }
         }
+    }
+
+    @Test(timeout = 10_000)
+    fun aFailedRebuildIsLostAsDropped() {
+        val fake = FakeDevice(openResults = ArrayDeque(listOf(true, false))).apply { failReads = true }
+        val losses = Losses()
         val session = PcmCaptureSession(
-            device = device,
+            device = fake,
             onFrame = { _, _ -> },
-            onStarted = { started.incrementAndGet() },
-            onStopped = { stopped.countDown() },
+            onLost = losses::add,
+            rebuildAfterReadFailures = 3,
+            readErrorBackoffMs = 0,
             pollMs = 0,
         )
 
         session.start()
-        await(inOpen)
-        val stopper = Thread { session.stop() }.apply { start() }
-        Thread.sleep(50) // stop() has cleared `running` and is in its bounded join
-        proceedOpen.countDown() // open() succeeds after the stop
-        stopper.join(5_000)
-        await(stopped)
+        await(losses.lost)
+        Thread.sleep(50) // room for a second, wrong, report to arrive
 
-        assertEquals("onStarted must not fire for a session stopped mid-open", 0, started.get())
-        assertTrue("the opened device is still released", releases.get() >= 1)
+        assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses.all)
+        session.stop()
+    }
+
+    @Test(timeout = 10_000)
+    fun anExceptionEscapingTheReadLoopIsLostAsDropped() {
+        val losses = Losses()
+        val released = AtomicInteger()
+        val device = object : PcmDevice {
+            override fun open() = true
+            override fun read(buf: ByteArray, offset: Int, length: Int): Int = error("boom")
+            override fun stop() = Unit
+            override fun release() {
+                released.incrementAndGet()
+            }
+        }
+        val session = PcmCaptureSession(device = device, onFrame = { _, _ -> }, onLost = losses::add, pollMs = 0)
+
+        session.start()
+        await(losses.lost)
+        Thread.sleep(50) // room for a second, wrong, report to arrive
+
+        assertEquals(
+            listOf(CaptureLoss.Dropped("capture ended unexpectedly: IllegalStateException: boom")),
+            losses.all,
+        )
+        assertTrue("the mic is still released", released.get() >= 1)
+        session.stop()
     }
 
     @Test(timeout = 10_000)
@@ -608,7 +717,7 @@ class PcmCaptureSessionTest {
         val fake = FakeDevice().apply { framesToServe = 1 }
         val inFrame = CountDownLatch(1)
         val releaseFrame = CountDownLatch(1)
-        val stopped = CountDownLatch(1)
+        val log = StopLog()
         lateinit var session: PcmCaptureSession
         session = PcmCaptureSession(
             device = fake,
@@ -617,7 +726,7 @@ class PcmCaptureSessionTest {
                 inFrame.countDown()
                 releaseFrame.await() // hold the capture thread inside the callback (loop hasn't exited yet)
             },
-            onStopped = { stopped.countDown() },
+            log = log,
             pollMs = 0,
         )
 
@@ -627,7 +736,7 @@ class PcmCaptureSessionTest {
         assertFalse("start() must be refused while the self-stopped loop is still alive", session.start())
 
         releaseFrame.countDown() // let the callback return so the loop reaches its finally
-        await(stopped)
+        await(log.stopped)
 
         // Once the loop has exited, start() succeeds again.
         val restarted = (0 until 100).any {
@@ -692,16 +801,21 @@ class PcmCaptureSessionTest {
     private class SilenceRecorder {
         val frames = AtomicInteger()
         val framesAtSilenced = AtomicInteger(-1)
-        val errors = CopyOnWriteArrayList<String>()
-        val stopped = CountDownLatch(1)
+        val losses = Losses()
+        val log = StopLog()
+
+        // Counts the frames delivered before the loss: none arrives after it, as capture ends there.
+        private fun lost(loss: CaptureLoss) {
+            if (loss is CaptureLoss.Silenced) framesAtSilenced.compareAndSet(-1, frames.get())
+            losses.add(loss)
+        }
 
         fun session(device: PcmDevice, silenceWindowMs: Long? = SILENCE_WINDOW_MS, idleRebuildMs: Long? = null) =
             PcmCaptureSession(
                 device = device,
                 onFrame = { _, _ -> frames.incrementAndGet() },
-                onError = { errors.add(it) },
-                onStopped = { stopped.countDown() },
-                onSilenced = { framesAtSilenced.compareAndSet(-1, frames.get()) },
+                onLost = ::lost,
+                log = log,
                 silenceWindowMs = silenceWindowMs,
                 idleRebuildMs = idleRebuildMs,
                 pollMs = 0,
@@ -714,12 +828,12 @@ class PcmCaptureSessionTest {
         val session = recorder.session(SampleDevice(listOf(0)))
 
         session.start()
-        await(recorder.stopped)
+        await(recorder.losses.lost)
 
         // 2 s of 16 kHz audio in 100 ms frames is 20 frames: silenced on the 20th, and capture ends there.
         assertEquals(FRAMES_IN_WINDOW, recorder.framesAtSilenced.get())
         assertEquals(FRAMES_IN_WINDOW, recorder.frames.get())
-        assertTrue("silence is not an error: ${recorder.errors}", recorder.errors.isEmpty())
+        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
         session.stop()
     }
 
@@ -731,7 +845,7 @@ class PcmCaptureSessionTest {
         val session = recorder.session(SampleDevice(List<Short>(FRAMES_IN_WINDOW - 1) { 0 } + 1.toShort() + 0))
 
         session.start()
-        await(recorder.stopped)
+        await(recorder.losses.lost)
 
         assertEquals(40, recorder.framesAtSilenced.get())
         session.stop()
@@ -766,7 +880,7 @@ class PcmCaptureSessionTest {
         val session = recorder.session(device, idleRebuildMs = 50)
 
         session.start()
-        await(recorder.stopped)
+        await(recorder.losses.lost)
 
         assertEquals("the stall rebuilt the device", 2, opens.get())
         assertEquals(30, recorder.framesAtSilenced.get())
@@ -781,9 +895,10 @@ class PcmCaptureSessionTest {
         session.start()
         while (recorder.frames.get() < 2 * FRAMES_IN_WINDOW) Thread.sleep(1)
         session.stop()
-        await(recorder.stopped)
+        await(recorder.log.stopped)
 
         assertEquals("never silenced", -1, recorder.framesAtSilenced.get())
+        assertEquals("a requested stop is not a loss", emptyList<CaptureLoss>(), recorder.losses.all)
     }
 
     private companion object {
