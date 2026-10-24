@@ -30,8 +30,8 @@ import java.util.concurrent.atomic.AtomicReference
  * included). The closed and capture-generation checks run when the callback is delivered, not when it is posted.
  *
  * **Closed state.** [close] is terminal and idempotent: after it no consumer callback is delivered (including ones
- * already posted), and [start] and [pause] are logged no-ops. It is bounded and safe from any thread, including from
- * inside the wake callback; see [close].
+ * already posted), and [start] and [pause] are logged no-ops. Its waits are bounded, and it is safe from any thread,
+ * including from inside the wake callback; see [close].
  *
  * **Mic-slot handoff & phone calls are NOT handled here** — the consumer drives [pause]/[start] for handoff
  * and call stand-down. [pause] yields the slot; [start] reacquires it, running [WakeMicConfig.beforeMicAcquire]
@@ -171,13 +171,17 @@ class WakeMicEngine internal constructor(
     /**
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
      *
-     * Bounded: the session's stop join, the wait for a detector call to finish and the wait for a wake already
+     * Bounded waits: the session's stop join, the wait for a detector call to finish and the wait for a wake already
      * being delivered share one deadline, [PcmCaptureSession.STOP_DEADLINE_MS], and the mic slot is free when it
      * returns (unless a stuck capture thread's forced device release hangs too: see [PcmCaptureSession.stop]). No
      * wake delivery begins after it returns, even from a capture thread it gave up waiting for. Detectors still busy
      * then, or busy in the calling thread (a close from inside the wake callback), are closed by the capture thread as
      * it leaves them, never in the middle of a call; a close that runs out of time logs a `🔴` line. If that call
      * never returns, the detectors' native resources leak until the process dies.
+     *
+     * Not bounded: the detectors' own [WakeDetector.close]. When the wait succeeds it runs on the calling thread after
+     * the deadline's waits, however long it takes. Freeing the Vosk model alone takes ~0.5 s on Portal+ gen1, so a
+     * close from the main thread usually blocks it past the deadline.
      */
     fun close() {
         if (!closed.compareAndSet(false, true)) return

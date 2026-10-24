@@ -46,7 +46,8 @@ All package `com.portal.commons`.
   free when it returns. The capture stop, the wait for a running detector call and the wait for a wake being
   delivered share one ~400 ms deadline (`PcmCaptureSession.STOP_DEADLINE_MS`). Detectors still busy then are closed
   by the capture thread as it leaves them, with a `🔴` log line; if that call never returns, their native resources
-  leak until the process dies.
+  leak until the process dies. The detector close itself is not under the deadline: when the wait succeeds it runs
+  on the calling thread, and freeing the Vosk model takes ~0.5 s on Portal+ gen1.
 
 ## Build / test (standalone)
 
