@@ -83,16 +83,17 @@ class WakeMicEngine internal constructor(
             }
             handoffCooldownUntilMs = nowMs + config.wakeHandoffCooldownMs
             config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
-            wakeGate.deliver(
-                onWake = { config.onWake(event) },
-                onDropped = { config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]") },
-            )
+            // Raised from inside accept, so the capture thread holds the detector lock. close() sets closed before it
+            // waits for that lock: a wake past this check is one close() waits for (or gives up on, already begun).
+            if (closed.get()) {
+                config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
+                return
+            }
+            config.onWake(event)
         }
 
         override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
     }
-
-    private val wakeGate = WakeGate()
 
     private val detectorHost = object : WakeDetector.Host {
         override val context: Context = context
@@ -166,13 +167,13 @@ class WakeMicEngine internal constructor(
     /**
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
      *
-     * Bounded waits: the session's stop join, the wait for a detector call to finish and the wait for a wake already
-     * being delivered share one deadline, [PcmCaptureSession.STOP_DEADLINE_MS], and the mic slot is free when it
-     * returns (unless a stuck capture thread's forced device release hangs too: see [PcmCaptureSession.stop]). No
-     * wake delivery begins after it returns, even from a capture thread it gave up waiting for. Detectors still busy
-     * then, or busy in the calling thread (a close from inside the wake callback), are closed by the capture thread as
-     * it leaves them, never in the middle of a call; a close that runs out of time logs a `🔴` line. If that call
-     * never returns, the detectors' native resources leak until the process dies.
+     * Bounded waits: the session's stop join and the wait for a detector call to finish (which covers a wake already
+     * being delivered, since a wake is delivered inside one) share one deadline, [PcmCaptureSession.STOP_DEADLINE_MS],
+     * and the mic slot is free when it returns (unless a stuck capture thread's forced device release hangs too: see
+     * [PcmCaptureSession.stop]). No wake delivery begins after it returns, even from a capture thread it gave up
+     * waiting for. Detectors still busy then, or busy in the calling thread (a close from inside the wake callback),
+     * are closed by the capture thread as it leaves them, never in the middle of a call; a close that runs out of time
+     * logs a `🔴` line. If that call never returns, the detectors' native resources leak until the process dies.
      *
      * Not bounded: the detectors' own [WakeDetector.close]. When the wait succeeds it runs on the calling thread after
      * the deadline's waits, however long it takes. Freeing the Vosk model alone takes ~0.5 s on Portal+ gen1, so a
@@ -184,7 +185,6 @@ class WakeMicEngine internal constructor(
         val leftMs = { TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()) }
         session?.stop()
         detectors.close(timeoutMs = leftMs())
-        wakeGate.close(timeoutMs = leftMs())
     }
 
     // A wedged session's thread may still call back once it unblocks; only the current capture request's session
