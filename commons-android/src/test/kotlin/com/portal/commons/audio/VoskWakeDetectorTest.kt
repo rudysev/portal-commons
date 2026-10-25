@@ -176,9 +176,38 @@ class VoskWakeDetectorTest {
         d.accept(frame(4), FRAME)
         loader.complete(model)
         d.accept(frame(5), FRAME)
+        d.accept(frame(6), FRAME)
 
-        assertEquals(listOf(2, 3, 4, 5), model.live.fedTags())
+        assertEquals(listOf(2, 3, 4, 5, 6), model.live.fedTags())
         assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), events.lines)
+    }
+
+    @Test fun eachFrameDecodesAtMostThreeReplayedFramesWithLiveFramesQueuedBehind() {
+        val d = detector()
+        (1..7).forEach { d.accept(frame(it), FRAME) }
+        loader.complete(model)
+
+        d.accept(frame(8), FRAME)
+        assertEquals(listOf(1, 2, 3), model.live.fedTags())
+        d.accept(frame(9), FRAME)
+        assertEquals((1..6).toList(), model.live.fedTags())
+        d.accept(frame(10), FRAME)
+        assertEquals((1..9).toList(), model.live.fedTags())
+        d.accept(frame(11), FRAME)
+        assertEquals((1..11).toList(), model.live.fedTags())
+        d.accept(frame(12), FRAME) // caught up: live frames decode as they arrive
+        assertEquals((1..12).toList(), model.live.fedTags())
+    }
+
+    @Test fun startDropsAReplayThePauseInterrupted() {
+        val d = detector()
+        (1..7).forEach { d.accept(frame(it), FRAME) }
+        loader.complete(model)
+        d.accept(frame(8), FRAME)
+        d.start() // the capture resumed after a pause: the rest of the backlog is stale
+        d.accept(frame(9), FRAME)
+
+        assertEquals(listOf(1, 2, 3, 9), model.live.fedTags())
     }
 
     @Test fun replayedFramesKeepTheirLengthAndAreCopied() {
@@ -197,9 +226,10 @@ class VoskWakeDetectorTest {
         val d = detector()
         (1..capacity + 2).forEach { d.accept(frame(it), FRAME) }
         loader.complete(model)
-        d.accept(frame(capacity + 3), FRAME)
+        val caughtUp = capacity + 2 + capacity / 2 // each live frame shrinks the backlog by two
+        (capacity + 3..caughtUp).forEach { d.accept(frame(it), FRAME) }
 
-        assertEquals((3..capacity + 3).toList(), model.live.fedTags())
+        assertEquals((3..caughtUp).toList(), model.live.fedTags())
         assertEquals("flushing $capacity pre-ready frame(s)", events.lines.last())
     }
 
@@ -216,7 +246,7 @@ class VoskWakeDetectorTest {
     }
 
     @Test fun replayStopsAtTheFirstWake() {
-        // Everything after a replayed wake, including the frame that triggered the replay, falls inside the
+        // Everything after a replayed wake, including the frame that started the replay, falls inside the
         // handoff cooldown, so none of it is decoded.
         val d = detector()
         d.accept(frame(2, endpoint = true), FRAME)
@@ -226,8 +256,9 @@ class VoskWakeDetectorTest {
         model.finals.add(HEY_JARVIS_CONFIDENT)
         loader.complete(model)
         d.accept(frame(5), FRAME)
+        d.accept(frame(6), FRAME) // live again: past the replay, only the engine drops cooldown frames
 
-        assertEquals(listOf(2), model.live.fedTags())
+        assertEquals(listOf(2, 6), model.live.fedTags())
         assertEquals(
             listOf("ready", "flushing 3 pre-ready frame(s)", "wake:jarvis [hey(97) jarvis(81)]"),
             events.lines,
