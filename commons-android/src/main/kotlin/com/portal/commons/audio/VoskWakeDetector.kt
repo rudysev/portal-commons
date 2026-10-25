@@ -23,10 +23,14 @@ import java.util.concurrent.atomic.AtomicReference
  * **On (re)start** ([start]) the decoder is reset — which re-warms it — so the first frame after a resume
  * isn't garbled.
  *
+ * **Replay is spread over frames.** The pre-ready buffer becomes a backlog that each [accept] decodes at most
+ * [REPLAY_FRAMES_PER_ACCEPT] frames of, with every live frame queued behind it until it drains. Decoding a full
+ * buffer in one call (~38 ms a frame on gen2, so 1–2 s) held the capture thread inside the callback past a
+ * pause's stop join, and the stop force-released the mic. A [start] drops a backlog left by the previous capture.
+ *
  * The **handoff cooldown** is [WakeMicEngine]'s single window after any wake: it simply stops feeding frames,
- * so this detector never sees it. The one place it would otherwise leak in is replay — the pre-ready buffer is
- * fed in one go, so replay stops at the first wake it emits, and the frame that triggered the replay is dropped
- * with the rest.
+ * so this detector never sees it. The one place it would otherwise leak in is replay — the backlog holds audio
+ * from before the wake — so a wake from the backlog drops the rest of it.
  * A match reports via [WakeDetector.Events.onWake]; diagnostics carry the exact `near-miss …` /
  * `flushed final …` strings the mic owner used to log.
  */
@@ -58,6 +62,9 @@ internal class VoskWakeDetector(
     private val idleReset = IdleResetPolicy()
     private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
 
+    // Replay frames not yet decoded, then the live frames queued behind them. Empty once replay has caught up.
+    private val backlog = ArrayDeque<ByteArray>()
+
     init {
         try {
             loader.load(::onModelDelivered) { events.onUnavailable(ID) }
@@ -84,6 +91,7 @@ internal class VoskWakeDetector(
     }
 
     override fun start() {
+        backlog.clear() // audio from before the pause
         reset()
         idleReset.noteFlushed(clock())
     }
@@ -94,10 +102,14 @@ internal class VoskWakeDetector(
                 preReadyBuffer.add(buf, n)
                 return
             }
-            if (replayPreReadyFrames()) return // this frame came after the replayed wake: inside the handoff cooldown
         }
         maybeIdleReset()
-        decode(buf, n)
+        if (backlog.isEmpty()) {
+            decode(buf, n)
+        } else {
+            backlog.addLast(buf.copyOf(n))
+            decodeBacklog()
+        }
     }
 
     /**
@@ -126,6 +138,7 @@ internal class VoskWakeDetector(
     override fun close() {
         closed = true
         delivered.getAndSet(null)?.let { runCatching { it.close() } }
+        backlog.clear()
         runCatching { decoder?.close() }
         decoder = null
         runCatching { model?.close() }
@@ -133,8 +146,8 @@ internal class VoskWakeDetector(
     }
 
     /**
-     * Take a model the loader delivered: build + warm the first decoder, signal readiness. False when there is
-     * no model yet, or its first decoder build failed (unavailable).
+     * Take a model the loader delivered: build + warm the first decoder, signal readiness and move the pre-ready
+     * buffer into the backlog. False when there is no model yet, or its first decoder build failed (unavailable).
      */
     private fun adoptDeliveredModel(): Boolean {
         val m = delivered.getAndSet(null) ?: return false
@@ -145,15 +158,25 @@ internal class VoskWakeDetector(
         } else {
             decoder = dec
             events.onReady(ID)
+            val buffered = preReadyBuffer.drain()
+            if (buffered.isNotEmpty()) events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
+            backlog.addAll(buffered)
         }
         return dec != null
     }
 
-    /** Decode the pre-ready buffer in order, stopping at the first wake. True if a wake fired. */
-    private fun replayPreReadyFrames(): Boolean {
-        val buffered = preReadyBuffer.drain()
-        if (buffered.isNotEmpty()) events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
-        return buffered.any { frame -> decode(frame, frame.size) } // any() stops at the first wake
+    /**
+     * Decode up to [REPLAY_FRAMES_PER_ACCEPT] backlog frames in order. A wake drops the rest: it was captured before
+     * the wake, so live it would have fallen inside the handoff cooldown.
+     */
+    private fun decodeBacklog() {
+        repeat(REPLAY_FRAMES_PER_ACCEPT) {
+            val frame = backlog.removeFirstOrNull() ?: return
+            if (decode(frame, frame.size)) {
+                backlog.clear()
+                return
+            }
+        }
     }
 
     private fun maybeIdleReset() {
@@ -226,6 +249,12 @@ internal class VoskWakeDetector(
         private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
 
         private val PRE_READY_MAX_FRAMES = 8_000 / PcmCaptureFormat.FRAME_MS
+
+        /**
+         * Backlog frames one [accept] decodes. About 115 ms of decoding on gen2, well inside a stop's join, and the
+         * backlog shrinks by two frames for each live one, so a full pre-ready buffer catches up in about 4 s.
+         */
+        const val REPLAY_FRAMES_PER_ACCEPT = 3
 
         fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
             VoskWakeDetector(
