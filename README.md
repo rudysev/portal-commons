@@ -15,6 +15,7 @@ must touch the Android SDK (the mic `AudioRecord` wrapper). `:commons-android` d
 | Class | Purpose |
 |---|---|
 | `DebugLog` | Best-effort file log → `files/debug.txt` (the Portal restricts `logcat`). Never throws, no-op until `file` is set — safe to call from a real-time capture thread. |
+| `PcmCapture` | The module every app captures the mic through, one **capture request** at a time (see `GLOSSARY.md`): `start(listener)` / `pause()` / `close()`. Each request's callbacks reach only its own listener and never run at once; at most one capture loss per request, posted to the main thread; `close()` is terminal and bounded. |
 | `PcmCaptureSession` / `PcmDevice` | The mic capture thread + its concurrency contract, driving a `PcmDevice` seam (the Android `AudioRecord` shell lives in `:commons-android`, so the session stays Android-free and unit-testable). Single-use; reports a capture loss through `onLost(CaptureLoss)`. |
 | `PcmCaptureFormat` | The single source of truth for the capture shape (16 kHz mono 16-bit, `BYTES_PER_SAMPLE`, derived `FRAME_BYTES`) that capture, level math, and the Android seam all key off. |
 | `PcmLevel` | RMS / level math for little-endian 16-bit mono PCM. Powers the recording-level indicator (`normalized`); `rms` exposes the raw amplitude for any other level check. Pure, fully tested. |
@@ -35,9 +36,10 @@ All package `com.portal.commons`.
 ### Wake mic engine lifecycle
 
 - **Capture request** (defined in `GLOSSARY.md`): the span from a `start()` that begins capture to the next
-  `pause()`, `close()` or capture loss. Each one captures on a fresh single-use `PcmCaptureSession` and device, bound
-  to that request (the internal `CaptureRequests` module). A `start()` joins an open request unless a loss has been
-  raised for it. A wedged older session never feeds a detector once a newer request has begun.
+  `pause()`, `close()` or capture loss. The engine captures through one `PcmCapture`, which binds each request's
+  callbacks to that request and captures it on a fresh device. Every `start()` passes the engine's one listener, so a
+  `start()` joins an open request unless a loss has been raised for it. A wedged older capture thread never feeds a
+  detector once a newer request has begun.
 - **Capture loss** (defined in `GLOSSARY.md`) arrives as `onCaptureLost(CaptureLoss)`, at most once per capture
   request. A loss that a `pause()` or a newer `start()` has overtaken reports nothing, even if it was already posted.
   After a loss the engine is idle, as after `pause()`, and never retries on its own: retry by calling `start()`.
@@ -49,7 +51,7 @@ All package `com.portal.commons`.
   posted, and `start()` / `pause()` are logged no-ops.
 - **Bounded close.** `close()` is synchronous and safe from any thread, including the wake callback; the mic slot is
   free when it returns. The capture stop, the wait for a running detector call and the wait for a wake being
-  delivered share one ~400 ms deadline (`PcmCaptureSession.STOP_DEADLINE_MS`). Detectors still busy then are closed
+  delivered share one ~400 ms deadline (`PcmCapture.STOP_DEADLINE_MS`). Detectors still busy then are closed
   by the capture thread as it leaves them, with a `🔴` log line; if that call never returns, their native resources
   leak until the process dies. The detector close itself is not under the deadline: when the wait succeeds it runs
   on the calling thread, and freeing the Vosk model takes ~0.5 s on Portal+ gen1.
