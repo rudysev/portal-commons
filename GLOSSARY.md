@@ -29,8 +29,12 @@ _Avoid_: flush buffer (replaying it is a "replay", not a "flush")
 ### Capture
 
 **Capture request**:
-The span during which the consumer wants capture running: from a `start()` that begins it to the next `pause()`, `close()` or **capture loss**. A `start()` while a request is open joins it rather than beginning a new one.
+The span during which the consumer wants capture running: from a `start()` that begins it to the next `pause()`, `close()` or **capture loss**. A `start()` while a request is open joins it rather than beginning a new one, unless it brings a different listener, which ends the open request and begins a new one.
 _Avoid_: generation, run (one capture thread, which may rebuild its device several times within a request)
+
+**PcmCapture**:
+The module every app captures the mic through, one **capture request** at a time: each request's callbacks reach only its own listener and never run at once, it raises at most one **capture loss**, and closing it is terminal and bounded.
+_Avoid_: capture session (the single-use capture underneath, internal to it), mic capture
 
 **Capture loss**:
 Capture is not running, or is running but delivering no audio, during a **capture request** for a reason the consumer did not ask for. It ends the request. Reported at most once per capture request, with one of three causes: **not granted** (the mic could not be opened), **dropped** (capture was running and died, including a failed rebuild) or **silenced** (capture is running but delivers only digital silence, whatever the reason).
