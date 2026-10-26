@@ -1,7 +1,7 @@
 package com.portal.commons
 
 /**
- * The microphone device a [PcmCaptureSession] drives — the thin, per-app Android seam (an `AudioRecord`
+ * The microphone device a [PcmCapture] drives — the thin, per-app Android seam (an `AudioRecord`
  * wrapper) kept out of this Android-free library so the session's concurrency contract stays unit-testable.
  *
  * A single instance is **reused across open/release cycles** so the session can rebuild it: [open] must

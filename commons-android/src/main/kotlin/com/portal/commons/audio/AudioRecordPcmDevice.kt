@@ -10,7 +10,7 @@ import com.portal.commons.PcmDevice
 /**
  * The shared Android microphone behind the [PcmDevice] seam: one `AudioRecord` (VOICE_RECOGNITION,
  * 16 kHz mono 16-bit, **no audio effects** — AGC/NoiseSuppressor deliberately off, the proven Portal
- * config). Recreated on each [open] so [com.portal.commons.PcmCaptureSession] can rebuild it after a run of
+ * config). Recreated on each [open] so [com.portal.commons.PcmCapture] can rebuild it after a run of
  * read errors; [read] is **non-blocking** (`AudioRecord.READ_NON_BLOCKING`). Used by consuming apps'
  * capture sessions.
  *

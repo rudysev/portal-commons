@@ -16,11 +16,11 @@ must touch the Android SDK (the mic `AudioRecord` wrapper). `:commons-android` d
 |---|---|
 | `DebugLog` | Best-effort file log → `files/debug.txt` (the Portal restricts `logcat`). Never throws, no-op until `file` is set — safe to call from a real-time capture thread. |
 | `PcmCapture` | The module every app captures the mic through, one **capture request** at a time (see `GLOSSARY.md`): `start(listener)` / `pause()` / `close()`. Each request's callbacks reach only its own listener and never run at once; at most one capture loss per request, posted to the main thread; `close()` is terminal and bounded. |
-| `PcmCaptureSession` / `PcmDevice` | The mic capture thread + its concurrency contract, driving a `PcmDevice` seam (the Android `AudioRecord` shell lives in `:commons-android`, so the session stays Android-free and unit-testable). Single-use; reports a capture loss through `onLost(CaptureLoss)`. |
+| `PcmDevice` | The microphone seam `PcmCapture` drives through its internal single-use capture session (the Android `AudioRecord` shell lives in `:commons-android`, so capture stays Android-free and unit-testable). |
 | `PcmCaptureFormat` | The single source of truth for the capture shape (16 kHz mono 16-bit, `BYTES_PER_SAMPLE`, derived `FRAME_BYTES`) that capture, level math, and the Android seam all key off. |
 | `PcmLevel` | RMS / level math for little-endian 16-bit mono PCM. Powers the recording-level indicator (`normalized`); `rms` exposes the raw amplitude for any other level check. Pure, fully tested. |
 | `WakeMatcher` / `WakeWord` | Pure wake-decision logic and phrase model (`com.portal.commons.audio`). |
-| `CaptureLoss` | A **capture loss** (see `GLOSSARY.md`): `NotGranted`, `Dropped` or `Silenced`, each with a `reason` for the log (`com.portal.commons.audio`). Reported by `PcmCaptureSession`'s `onLost`; reaches apps through `PcmCapture.Listener.onLost` (the wake engine through `WakeMicConfig.onCaptureLost`). |
+| `CaptureLoss` | A **capture loss** (see `GLOSSARY.md`): `NotGranted`, `Dropped` or `Silenced`, each with a `reason` for the log (`com.portal.commons.audio`). Reaches apps through `PcmCapture.Listener.onLost` (the wake engine through `WakeMicConfig.onCaptureLost`). |
 
 All package `com.portal.commons`.
 

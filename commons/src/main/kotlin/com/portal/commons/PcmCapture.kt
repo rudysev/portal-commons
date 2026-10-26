@@ -269,7 +269,7 @@ class PcmCapture(
         /** The one bound on stopping capture: [pause]'s stop, and the shared deadline of [close]'s waits. */
         const val STOP_DEADLINE_MS = PcmCaptureSession.STOP_DEADLINE_MS
 
-        /** Recommended idle rebuild window for an always-listening consumer (see [PcmCaptureSession]). */
+        /** Recommended idle rebuild window for an always-listening consumer. */
         const val DEFAULT_IDLE_REBUILD_MS = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS
 
         /**
