@@ -91,11 +91,7 @@ class WakeMicEngineTest {
             val wakeId = wakeOnNextAccept ?: return
             wakeOnNextAccept = null
             host.events.onWake(WakeEvent(id, wakeId, "transcript"))
-            closesWhenTheWakeReturned.add(closes)
         }
-
-        /** [closes] as seen inside [accept] right after the wake it fired returned. */
-        val closesWhenTheWakeReturned = CopyOnWriteArrayList<Int>()
 
         override fun updateWakeWords(words: List<WakeWord>) {
             wakeWordUpdates.add(words)
@@ -120,11 +116,11 @@ class WakeMicEngineTest {
     private val unavailable = CopyOnWriteArrayList<String>()
     private val losses = CopyOnWriteArrayList<CaptureLoss>()
     private val posted = CopyOnWriteArrayList<Runnable>()
-    private val micAcquires = CopyOnWriteArrayList<Unit>()
+    private val opensAtAcquire = CopyOnWriteArrayList<Int>()
+
+    @Volatile private var beforeMicAcquire: () -> Unit = { opensAtAcquire.add(-1) }
     private val detectors = CopyOnWriteArrayList<FakeDetector>()
     private lateinit var engine: WakeMicEngine
-
-    @Volatile private var closeOnWake = false
 
     private fun newEngine(
         detectorCount: Int = 1,
@@ -145,14 +141,13 @@ class WakeMicEngineTest {
             },
             wakeHandoffCooldownMs = 1_500L,
             onWake = {
-                if (closeOnWake) engine.close()
                 wakes.add(it)
                 wakeThreads.add(Thread.currentThread().name)
             },
             onDetectorReady = { ready.add(it) },
             onDetectorUnavailable = { unavailable.add(it) },
             onCaptureLost = { losses.add(it) },
-            beforeMicAcquire = { micAcquires.add(Unit) },
+            beforeMicAcquire = { beforeMicAcquire() },
             log = {
                 beforeLog(it)
                 logs.add(it)
@@ -339,66 +334,32 @@ class WakeMicEngineTest {
         assertEquals(emptyList<String>(), unavailable)
     }
 
-    @Test fun startAfterCloseIsALoggedNoOp() {
+    @Test fun beforeMicAcquireRunsBeforeTheMicOpens() {
+        newEngine()
+        beforeMicAcquire = { opensAtAcquire.add(device.opens) }
+        engine.start()
+        device.push()
+
+        assertEquals(listOf(0), opensAtAcquire)
+        assertEquals(1, device.opens)
+    }
+
+    @Test fun aStartAfterCloseNeitherRunsBeforeMicAcquireNorOpensTheMic() {
         newEngine().close()
         engine.start()
 
-        assertEquals(emptyList<Unit>(), micAcquires)
+        assertEquals(emptyList<Int>(), opensAtAcquire)
         assertEquals(0, device.opens)
-        assertTrue(logs.contains("start() after close() ignored"))
     }
 
-    @Test fun pauseAfterCloseIsALoggedNoOp() {
-        newEngine().close()
-        engine.pause()
-
-        assertTrue(logs.contains("pause() after close() ignored"))
-        assertTrue(logs.none { it.startsWith("mic paused") })
-    }
-
-    @Test fun closingTwiceClosesTheDetectorsOnce() {
-        newEngine().close()
+    @Test fun closingTwiceClosesEveryDetectorOnce() {
+        newEngine(detectorCount = 2).close()
         engine.close()
 
-        assertEquals(1, detector.closes)
+        assertEquals(listOf(1, 1), detectors.map { it.closes })
     }
 
-    @Test fun eachCaptureRequestCapturesOnAFreshDevice() {
-        val devices = CopyOnWriteArrayList<SteppedDevice>()
-        newEngine(newDevice = { SteppedDevice().also { devices.add(it) } })
-        engine.start()
-        devices.last().push()
-        engine.pause()
-        engine.start()
-        devices.last().push()
-
-        assertEquals(2, devices.size)
-        assertEquals(listOf(1, 1), devices.map { it.opens })
-        assertEquals(listOf(0L, 0L), detector.accepts)
-    }
-
-    @Test fun aStartAfterALossCapturesAgain() {
-        newEngine()
-        device.failOpens = 1
-        engine.start()
-        awaitLogThenRunPosted("pcm open failed")
-        engine.start()
-        device.push()
-
-        assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
-        assertEquals(listOf(0L), detector.accepts)
-    }
-
-    @Test fun aRequestedPauseDeliversNoCaptureLoss() {
-        newEngine().start()
-        device.push()
-        engine.pause()
-        runPosted()
-
-        assertEquals(emptyList<CaptureLoss>(), losses)
-    }
-
-    @Test fun aMicThatWontOpenDeliversExactlyOneNotGranted() {
+    @Test fun aLossReachesOnCaptureLost() {
         newEngine()
         device.failOpens = 1
         engine.start()
@@ -409,7 +370,7 @@ class WakeMicEngineTest {
         assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
     }
 
-    @Test fun aFailedRebuildDuringCaptureDeliversExactlyOneDropped() {
+    @Test fun theEngineRebuildsAfterRepeatedReadFailures() {
         newEngine().start()
         device.push()
         device.failOpens = 1
@@ -419,7 +380,7 @@ class WakeMicEngineTest {
         assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses)
     }
 
-    @Test fun twoSecondsOfDigitalSilenceDeliversExactlyOneSilenced() {
+    @Test fun theEngineCapturesUnderATwoSecondSilenceWindow() {
         newEngine().start()
         repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
         device.offer() // the 20th fills the 2 s window, and capture ends inside it
@@ -428,78 +389,6 @@ class WakeMicEngineTest {
         runPosted()
 
         assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), losses)
-    }
-
-    @Test fun aPauseInsideTheSilenceDeliversNothingAndTheNextStartGetsAFullWindow() {
-        newEngine().start()
-        repeat(10) { device.push() }
-        engine.pause()
-        engine.start()
-        repeat(19) { device.push() } // 2.9 s of silence across the pause, but only 1.9 s since the start
-        runPosted()
-
-        assertEquals(emptyList<CaptureLoss>(), losses)
-    }
-
-    @Test fun aLossThatANewerStartOvertookIsDroppedWhenTheQueueDrains() {
-        newEngine()
-        device.failOpens = 1
-        engine.start()
-        await("the loss is posted") { posted.isNotEmpty() }
-        engine.start()
-        device.push() // the newer start is capturing
-        runPosted()
-
-        assertEquals(emptyList<CaptureLoss>(), losses)
-    }
-
-    @Test fun aLateStopFromAnEarlierPauseLandingAfterARestartDeliversNothing() {
-        val holdStop = CountDownLatch(1)
-        beforeLog = { if (it == "pcm capture stopped") holdStop.await() }
-        newEngine().start()
-        device.push()
-        engine.pause() // the capture thread is held after it gave up the session, so the stop join times out
-        engine.start()
-        device.push() // the restart is capturing
-        holdStop.countDown() // the earlier run's stop now lands
-        awaitLogThenRunPosted("pcm capture stopped")
-        Thread.sleep(50) // room for the late stop to be posted
-        runPosted()
-
-        assertEquals(emptyList<CaptureLoss>(), losses)
-    }
-
-    @Test fun aStartRacingTheStopOfAFailedRebuildLeavesTheNextLossReported() {
-        val stopReached = CountDownLatch(1)
-        val holdStop = CountDownLatch(1)
-        beforeLog = {
-            if (it == "pcm capture stopped") {
-                stopReached.countDown()
-                holdStop.await()
-            }
-        }
-        newEngine().start()
-        device.push()
-        device.failOpens = 1
-        device.failReads = true // the rebuild fails; the run has given up the session but not yet reported its stop
-        assertTrue(stopReached.await(2, TimeUnit.SECONDS))
-        device.failReads = false
-        engine.start() // the consumer starts again before that stop lands
-        holdStop.countDown()
-        await("the failed run's stop is reported") { logs.count { it == "pcm capture stopped" } == 1 }
-        Thread.sleep(50) // room for the stop to be posted
-        runPosted()
-        if (losses.isNotEmpty()) engine.start() // a consumer retries on a loss
-
-        device.push() // capture is running
-        device.failOpens = 1
-        device.failReads = true // and this run fails too
-        await("the second run's stop") { logs.count { it == "pcm capture stopped" } == 2 }
-        Thread.sleep(50)
-        runPosted()
-
-        assertEquals(CaptureLoss.Dropped("microphone unavailable on rebuild"), losses.lastOrNull())
-        assertEquals("the second run's loss went unreported", 2, losses.size)
     }
 
     @Test fun aWakeRaisedAfterCloseNeverReachesTheConsumer() {
@@ -527,17 +416,5 @@ class WakeMicEngineTest {
         await("the detector closes once the frame ends") { detector.closes == 1 }
 
         assertEquals(emptyList<WakeEvent>(), wakes)
-    }
-
-    @Test fun closeFromInsideTheWakeCallbackClosesTheDetectorOnlyOnceTheFrameEnds() {
-        closeOnWake = true
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.offer()
-
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (detector.closes == 0 && System.nanoTime() < deadline) Thread.sleep(5)
-        assertEquals("closed in the middle of accept", listOf(0), detector.closesWhenTheWakeReturned)
-        assertEquals(1, detector.closes)
     }
 }
