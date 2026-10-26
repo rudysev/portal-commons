@@ -407,7 +407,7 @@ class PcmCaptureSession internal constructor(
     companion object {
         /**
          * The one bound on stopping capture: [stop]'s whole wait (join plus force-release), and the
-         * shared deadline of `WakeMicEngine.close()`'s waits (not of the detector close that follows them).
+         * shared deadline of [PcmCapture.close]'s waits (not of the `onClosed` that follows them).
          */
         const val STOP_DEADLINE_MS = 400L
         const val DEFAULT_READ_ERROR_BACKOFF_MS = 20L
