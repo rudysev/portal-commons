@@ -78,8 +78,8 @@ class PcmCapture(
     /** True once [close] has begun. */
     val isClosed: Boolean get() = lifecycle !== Lifecycle.OPEN
 
-    // Guards open, session, each request's raised flag and the move out of OPEN, so a start() racing close() either
-    // builds a session close() then stops, or sees the module closed.
+    // Guards open, session, overtaken, each request's raised flag and the move out of OPEN, so a start() racing close()
+    // either builds a session close() then stops, or sees the module closed.
     private val requestLock = Any()
 
     // The open request, if any: always the newest one, since only start() sets it.
@@ -90,6 +90,10 @@ class PcmCapture(
 
     // The newest request's session; null until the first start().
     private var session: PcmCaptureSession? = null
+
+    // Sessions a start() overtook and is still stopping, outside requestLock. pause() and close() stop them too, so a
+    // capture the overtaking start() has yet to free still holds no mic slot when they return.
+    private val overtaken = mutableListOf<PcmCaptureSession>()
 
     // Serializes every listener callback, and onClosed. Never taken while holding requestLock. requestLock may be
     // taken under it: a callback can call start(), pause() or close().
@@ -103,9 +107,14 @@ class PcmCapture(
      */
     fun start(listener: Listener) {
         val begun = beginRequestOrNull(listener) ?: return
-        // Outside the lock, the overtaken capture first, so it frees the mic slot before the new one opens it. A
-        // close() that stopped the new session first leaves its start a no-op, as on any stopped session.
-        begun.overtaken?.stop()
+        // Outside the lock, the overtaken capture first, so the new one opens the mic only once the old one is told to
+        // stop. From any thread but the old capture thread that stop frees the mic slot first; from inside one of its
+        // callbacks it only signals, as pause() then start() there would. A pause() or close() that stopped the new
+        // session first leaves its start a no-op, as on any stopped session.
+        begun.overtaken?.let { old ->
+            old.stop()
+            synchronized(requestLock) { overtaken.remove(old) }
+        }
         begun.session.start()
     }
 
@@ -128,12 +137,15 @@ class PcmCapture(
             }
 
             else -> {
-                val overtaken = if (joined != null && !joined.raised) session else null
-                if (overtaken != null) log("start() with a different listener — ending the open capture request")
+                val ended = if (joined != null && !joined.raised) session else null
+                if (ended != null) {
+                    log("start() with a different listener — ending the open capture request")
+                    overtaken.add(ended)
+                }
                 val request = CaptureRequest(listener)
                 open = request
                 current = request
-                Begun(newSession(request).also { session = it }, overtaken)
+                Begun(newSession(request).also { session = it }, ended)
             }
         }
     }
@@ -146,9 +158,9 @@ class PcmCapture(
         if (ignoredAfterClose("pause()")) return
         val stopping = synchronized(requestLock) {
             open = null
-            session
+            stopOrder()
         }
-        stopping?.stop()
+        stopping.forEach { it.stop() }
         log("mic paused (yielded slot)")
     }
 
@@ -163,11 +175,16 @@ class PcmCapture(
         val stopping = synchronized(requestLock) {
             if (isClosed) return
             lifecycle = Lifecycle.STOPPING_CAPTURE
-            session
+            stopOrder()
         }
-        stopping?.stop()
+        stopping.forEach { it.stop() }
         runOnClosed(timeoutMs = TimeUnit.NANOSECONDS.toMillis(deadlineNs - System.nanoTime()))
     }
+
+    // Under requestLock: every session that may still hold the mic, the newest first. A start() starts its own session
+    // only once it has stopped the one it overtook, so stopping the newest first turns a pending start into a no-op
+    // rather than a capture that opens the mic behind the stop.
+    private fun stopOrder(): List<PcmCaptureSession> = listOfNotNull(session) + overtaken.asReversed()
 
     private fun ignoredAfterClose(call: String): Boolean = isClosed.also { if (it) log("$call after close() ignored") }
 

@@ -322,6 +322,20 @@ class PcmCaptureTest {
         assertEquals(listOf(DROPPED, DROPPED), listener.losses)
     }
 
+    @Test(timeout = 10_000)
+    fun aCloseRacingAStartThatOvertookARequestReturnsOnlyOnceTheOvertakenMicIsFreed() {
+        val overtakenReleased = raceAStartThatOvertakesARequest { capture.close() }
+
+        assertTrue("close() returned while the overtaken capture still held the mic", overtakenReleased)
+    }
+
+    @Test(timeout = 10_000)
+    fun aPauseRacingAStartThatOvertookARequestReturnsOnlyOnceTheOvertakenMicIsFreed() {
+        val overtakenReleased = raceAStartThatOvertakesARequest { capture.pause() }
+
+        assertTrue("pause() returned while the overtaken capture still held the mic", overtakenReleased)
+    }
+
     @Test fun callbacksAlreadyQueuedAreNotDeliveredAfterClose() {
         newCapture()
         device.failOpens = 1
@@ -460,6 +474,31 @@ class PcmCaptureTest {
         assertEquals(emptyList<Unit>(), second.starts)
         assertEquals(emptyList<Int>(), second.frames)
         assertEquals(1, third.starts.size)
+    }
+
+    /**
+     * Runs [call] on this thread while another thread's start() with a different listener is still stopping the
+     * request it overtook: that request's capture thread is held inside its device release. Returns whether the
+     * overtaken device had been released by the time [call] returned.
+     */
+    private fun raceAStartThatOvertakesARequest(call: () -> Unit): Boolean {
+        val devices = CopyOnWriteArrayList<SteppedDevice>()
+        val holdRelease = CountDownLatch(1)
+        val released = AtomicInteger()
+        newCapture(newDevice = { SteppedDevice().also { devices.add(it) } })
+        capture.start(listener)
+        val first = devices.single()
+        first.onRelease = {
+            if (Thread.currentThread().name == "pcm-capture") holdRelease.await() else released.incrementAndGet()
+        }
+        first.push()
+        val starting = Thread { capture.start(RecordingListener()) }.apply { start() }
+        await("the overtaking start built its session") { devices.size == 2 }
+        call()
+        val releasedOnReturn = released.get() > 0
+        holdRelease.countDown()
+        starting.join()
+        return releasedOnReturn
     }
 
     private fun replayWedge(wedged: OverlapListener) {
