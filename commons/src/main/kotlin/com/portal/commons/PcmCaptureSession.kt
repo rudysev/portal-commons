@@ -11,6 +11,10 @@ import kotlin.concurrent.withLock
  * **without ever hanging**. The Android `AudioRecord` lives behind [PcmDevice], so this concurrency
  * contract is pure JVM and unit-tested with a fake device.
  *
+ * **Capture through [PcmCapture] instead.** It runs one of these per capture request and meets the duties this
+ * session leaves its caller: binding callbacks to the current request, serializing a wedged older session against a
+ * newer one, and closing the consumer only when no callback is running.
+ *
  * Callbacks ([onFrame], [onStarted], [onLost]) and [log] all run on the capture thread — keep them
  * cheap and non-blocking. [start]/[stop] are driven from a controlling thread (e.g. a service's main Handler); they
  * synchronize internally, but a callback on the capture thread should not call [stop] expecting to join itself (a
