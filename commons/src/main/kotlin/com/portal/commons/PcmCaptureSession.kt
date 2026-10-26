@@ -6,14 +6,14 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Owns the microphone-capture lifecycle shared by consuming apps: a single capture thread that opens a
+ * Owns one capture behind [PcmCapture]: a single capture thread that opens a
  * [PcmDevice], assembles [PcmCaptureFormat]-sized frames from non-blocking reads, and tears down
  * **without ever hanging**. The Android `AudioRecord` lives behind [PcmDevice], so this concurrency
  * contract is pure JVM and unit-tested with a fake device.
  *
- * **Capture through [PcmCapture] instead.** It runs one of these per capture request and meets the duties this
- * session leaves its caller: binding callbacks to the current request, serializing a wedged older session against a
- * newer one, and closing the consumer only when no callback is running.
+ * [PcmCapture] runs one of these per capture request and meets the duties this session leaves its caller: binding
+ * callbacks to the current request, serializing a wedged older session against a newer one, and closing the consumer
+ * only when no callback is running.
  *
  * Callbacks ([onFrame], [onStarted], [onLost]) and [log] all run on the capture thread — keep them
  * cheap and non-blocking. [start]/[stop] are driven from a controlling thread (e.g. a service's main Handler); they
@@ -34,8 +34,8 @@ import kotlin.concurrent.withLock
  * If the thread doesn't exit in time (it overran the join inside a callback, or a native call hung), [stop]
  * force-releases the device as a last resort (on a helper thread, so [stop] stays bounded) so the mic slot can't
  * stay held. The wedged thread, once it unblocks, sees `running == false` and exits delivering no further frame and
- * no [onLost]. If it overran the join *inside* a callback, it is still running that callback when [stop] returns: a
- * caller that shares a consumer with a newer session must serialize it.
+ * no [onLost]. If it overran the join *inside* a callback, it is still running that callback when [stop] returns, which
+ * is why [PcmCapture] serializes every callback under one lock.
  *
  * **Single-use.** A session runs at most one capture: a second [start], or a [start] after [stop], is a logged
  * no-op. To capture again, build a fresh session.
@@ -55,11 +55,11 @@ import kotlin.concurrent.withLock
  * for that long, even in a quiet room (checked on Portal+ gen1), so there is no tolerance band. The window is counted
  * in samples, not on a clock, and starts again at every start, every rebuild and every non-zero sample.
  */
-// The constructors are the whole configuration surface: the public one's parameters after device/onFrame are optional
-// callbacks or policies with a default, and the apps pass them by name. A parameter object would only move the same
-// list.
+// The constructors are the whole configuration surface: the production one's parameters after device/onFrame are
+// optional callbacks or policies with a default, and PcmCapture passes them by name. A parameter object would only move
+// the same list.
 @Suppress("LongParameterList")
-class PcmCaptureSession internal constructor(
+internal class PcmCaptureSession(
     private val device: PcmDevice,
     private val onFrame: (buf: ByteArray, n: Int) -> Unit,
     private val onStarted: () -> Unit = {},
@@ -70,7 +70,7 @@ class PcmCaptureSession internal constructor(
     private val idleRebuildMs: Long? = null,
     private val silenceWindowMs: Long? = null,
     private val rebuildOnSilence: Boolean = false,
-    // Test timing, not policy: required here so a call that leaves it out picks the public constructor.
+    // Test timing, not policy: required here so a call that leaves it out picks the production constructor.
     private val pollMs: Long,
     private val readErrorBackoffMs: Long = DEFAULT_READ_ERROR_BACKOFF_MS,
     private val stopTimeoutMs: Long = STOP_DEADLINE_MS,

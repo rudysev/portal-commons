@@ -1,9 +1,9 @@
 package com.portal.commons.audio
 
 /**
- * A capture loss and its cause, as defined under **Capture loss** in `GLOSSARY.md`. Reported by the capture session
- * (`PcmCaptureSession`'s `onLost`) and delivered by the wake mic engine through `WakeMicConfig.onCaptureLost`;
- * [reason] is for the log.
+ * A capture loss and its cause, as defined under **Capture loss** in `GLOSSARY.md`. Reported through
+ * `PcmCapture.Listener.onLost`, and by the wake mic engine through `WakeMicConfig.onCaptureLost`; [reason] is for the
+ * log.
  */
 sealed interface CaptureLoss {
     val reason: String
