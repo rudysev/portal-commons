@@ -26,6 +26,10 @@ Reference moved out of `CLAUDE.md`; the hard rules stay there.
   stable.
 - Config is detekt's defaults plus `config/detekt/detekt.yml` (coroutine opt-ins, forbidden TODO-style comments,
   `@Composable` exempt from `FunctionNaming`, warnings as errors).
+- Runs in its own process (`detekt.use.worker.api=true` in `gradle.properties`): in the Gradle daemon its type
+  resolution kept reading `:commons-android`'s rebuilt classes jar as it was on the first run, so
+  `:commons-android:detektDebugUnitTest` analysed tests against stale main classes and only warned "N compiler errors
+  found during analysis" while `check` passed (`:commons` reads class directories and wasn't affected).
 
 ## Reports
 
