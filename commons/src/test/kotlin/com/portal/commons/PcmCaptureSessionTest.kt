@@ -13,13 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Unit tests for the shared capture lifecycle — the concurrency contract that's hard to verify on a real
  * `AudioRecord`. Two fake devices stand in for the Android mic:
- *  - [FakeDevice] is **non-blocking** (returns `0` when idle, like the real `READ_NON_BLOCKING`), with a
- *    configurable `bytesPerRead` so we can exercise partial-read frame assembly and the idle/error paths.
+ *  - [FakeDevice] is **non-blocking** (returns `0` when idle, like the real `READ_NON_BLOCKING`).
  *  - [BlockingFake] deliberately parks in `read` on a latch to stand in for the residual *hung native call*
  *    case (a non-blocking read never parks in production), exercising the bounded join + force-release and the
  *    post-stop "no frame after stop" gate.
  * Each test has a hard timeout so a regression (e.g. `stop()` hanging) fails the suite instead of blocking it.
- * Tests pass `pollMs = 0` (through the session's internal constructor) so the idle path doesn't add real sleeps.
+ * The frame rules themselves (assembly, rebuilds, the silence window) are [CaptureLoop]'s, tested in [CaptureLoopTest].
  */
 class PcmCaptureSessionTest {
 
@@ -47,11 +46,7 @@ class PcmCaptureSessionTest {
         }
     }
 
-    /**
-     * Non-blocking fake: serves [framesToServe] frames in [bytesPerRead]-byte chunks (assembled by the
-     * session into full [PcmCaptureFormat.FRAME_BYTES] frames), returns `0` (idle) once exhausted, and `-1`
-     * (error) while [failReads]. Never parks.
-     */
+    /** Non-blocking fake: serves [framesToServe] full frames, then returns `0` (idle). Never parks. */
     private class FakeDevice(private val openResults: ArrayDeque<Boolean> = ArrayDeque()) : PcmDevice {
         val openCount = AtomicInteger()
         val stopCount = AtomicInteger()
@@ -60,41 +55,16 @@ class PcmCaptureSessionTest {
 
         @Volatile var framesToServe = 0
 
-        @Volatile var bytesPerRead = PcmCaptureFormat.FRAME_BYTES // smaller → exercise partial assembly
-
-        @Volatile var failReads = false
-
-        private var frameBytesServed = 0 // capture-thread only
-
-        /** Counts down once the device has been opened ≥ 2 times — i.e. a rebuild re-opened it. */
-        val reopened = CountDownLatch(1)
-
         override fun open(): Boolean {
-            if (openCount.incrementAndGet() >= 2) reopened.countDown()
-            frameBytesServed = 0
+            openCount.incrementAndGet()
             return if (openResults.isEmpty()) true else openResults.removeFirst()
         }
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
             readCount.incrementAndGet()
-            return when {
-                failReads -> -1
-
-                framesToServe <= 0 -> 0
-
-                // idle: no data right now (NOT an error)
-                else -> serve(length)
-            }
-        }
-
-        private fun serve(length: Int): Int {
-            val give = minOf(length, bytesPerRead, PcmCaptureFormat.FRAME_BYTES - frameBytesServed)
-            frameBytesServed += give
-            if (frameBytesServed >= PcmCaptureFormat.FRAME_BYTES) {
-                framesToServe--
-                frameBytesServed = 0
-            }
-            return give
+            if (framesToServe <= 0) return 0 // idle: no data right now (NOT an error)
+            framesToServe--
+            return length
         }
 
         override fun stop() {
@@ -152,7 +122,6 @@ class PcmCaptureSessionTest {
             },
             onLost = losses::add,
             log = log,
-            pollMs = 0,
         )
 
         session.start()
@@ -167,60 +136,6 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
-    fun partialReadsAssembleIntoFullFrame() {
-        // Each onFrame must be exactly FRAME_BYTES even when the device dribbles bytes in small chunks —
-        // including a chunk size that does NOT divide FRAME_BYTES (3200) evenly.
-        for (chunk in listOf(640, 999)) {
-            val fake = FakeDevice().apply {
-                framesToServe = 2
-                bytesPerRead = chunk
-            }
-            val frames = AtomicInteger()
-            val gotFrames = CountDownLatch(2)
-            val log = StopLog()
-            val session = PcmCaptureSession(
-                device = fake,
-                onFrame = { _, n ->
-                    assertEquals("frame must be a full FRAME_BYTES (chunk=$chunk)", PcmCaptureFormat.FRAME_BYTES, n)
-                    frames.incrementAndGet()
-                    gotFrames.countDown()
-                },
-                log = log,
-                pollMs = 0,
-            )
-            session.start()
-            await(gotFrames)
-            session.stop()
-            await(log.stopped)
-            assertEquals(2, frames.get())
-            assertTrue("assembly should take more reads than frames (chunk=$chunk)", fake.readCount.get() > 2)
-        }
-    }
-
-    @Test(timeout = 10_000)
-    fun idleZeroReturnsDoNotTripRebuild() {
-        // A non-blocking read returning 0 (no data now) is NORMAL, not a failure: it must not count toward
-        // rebuildAfterReadFailures, so even a threshold of one read error never reopens the device.
-        val fake = FakeDevice() // framesToServe = 0 → read returns 0 (idle)
-        val gotFrame = CountDownLatch(1)
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> gotFrame.countDown() },
-            rebuildAfterReadFailures = 1,
-            readErrorBackoffMs = 0,
-            pollMs = 0,
-        )
-
-        session.start()
-        Thread.sleep(100) // let the loop poll the idle device many times
-        assertEquals("idle 0-returns are not read errors: no rebuild", 1, fake.openCount.get())
-
-        fake.framesToServe = 1 // prove the loop is still live and delivers once data arrives
-        await(gotFrame)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
     fun stopReturnsPromptlyWhenIdle() {
         val fake = FakeDevice() // idle: read returns 0
         val started = CountDownLatch(1)
@@ -229,7 +144,6 @@ class PcmCaptureSessionTest {
             device = fake,
             onFrame = { _, _ -> },
             log = log,
-            pollMs = 0,
         )
 
         session.start()
@@ -265,7 +179,6 @@ class PcmCaptureSessionTest {
             device = device,
             onFrame = { _, _ -> frames.incrementAndGet() },
             log = log,
-            pollMs = 0,
         )
 
         session.start()
@@ -290,7 +203,6 @@ class PcmCaptureSessionTest {
             onLost = losses::add,
             log = log,
             stopTimeoutMs = 50,
-            pollMs = 0,
         )
 
         session.start()
@@ -313,7 +225,6 @@ class PcmCaptureSessionTest {
             onFrame = { _, _ -> },
             log = { logs.add(it) },
             stopTimeoutMs = 50,
-            pollMs = 0,
         )
 
         session.start()
@@ -337,7 +248,7 @@ class PcmCaptureSessionTest {
                 releaseHung.await() // a native release that hangs as well
             }
         }
-        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, pollMs = 0, stopTimeoutMs = 200)
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, stopTimeoutMs = 200)
 
         session.start()
         await(capture.parked)
@@ -363,7 +274,6 @@ class PcmCaptureSessionTest {
                 inOnLost.countDown()
                 onLostHung.await()
             },
-            pollMs = 0,
             stopTimeoutMs = 200,
         )
 
@@ -375,69 +285,6 @@ class PcmCaptureSessionTest {
         onLostHung.countDown()
 
         assertTrue("stop() took $tookMs ms", tookMs < 300)
-    }
-
-    @Test(timeout = 10_000)
-    fun idleWatchdogRebuildsWhenLiveMicReturnsNoData() {
-        // A live mic that returns 0 (no data) for idleRebuildMs — a stolen/half-dead slot that never errors —
-        // must be recovered by a device rebuild, WITHOUT being counted as a read error.
-        val fake = FakeDevice() // framesToServe = 0 → read returns 0 (idle)
-        val gotFrame = CountDownLatch(1)
-        val log = CopyOnWriteArrayList<String>()
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> gotFrame.countDown() },
-            log = log::add,
-            rebuildAfterReadFailures = 1,
-            idleRebuildMs = 50,
-            pollMs = 0,
-        )
-
-        session.start()
-        await(fake.reopened) // sustained idle triggered a device rebuild (open #2)
-        assertTrue("idle must rebuild the device", fake.openCount.get() >= 2)
-        // Every reopen is the idle watchdog's: a threshold of one read error would have reopened on any.
-        assertTrue("idle 0-returns must NOT be counted as read errors: $log", log.none { "read failing" in it })
-
-        fake.framesToServe = 1 // recovery: data flows again → a frame is delivered
-        await(gotFrame)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun idleWatchdogRebuildsWhenMicTricklesSubFrameBytes() {
-        // The watchdog measures DELIVERED FRAMES, not raw reads. A half-dead mic that dribbles sub-frame bytes
-        // forever (n>0 every read but never enough to complete a 3200B frame) must still trip it — the old
-        // "reset the clock on any n>0" logic would never fire here, leaving the consumer silently deaf.
-        val opens = AtomicInteger()
-        val reopened = CountDownLatch(1)
-        val log = CopyOnWriteArrayList<String>()
-        val device = object : PcmDevice {
-            override fun open(): Boolean {
-                if (opens.incrementAndGet() >= 2) reopened.countDown()
-                return true
-            }
-            override fun read(buf: ByteArray, offset: Int, length: Int): Int {
-                Thread.sleep(5) // pace the trickle so a full frame can't assemble within idleRebuildMs
-                return 1 // one byte: n>0 (never an error, never a full frame)
-            }
-            override fun stop() = Unit
-            override fun release() = Unit
-        }
-        val session = PcmCaptureSession(
-            device = device,
-            onFrame = { _, _ -> },
-            log = log::add,
-            rebuildAfterReadFailures = 1,
-            idleRebuildMs = 150,
-            pollMs = 0,
-        )
-
-        session.start()
-        await(reopened) // a trickle that never completes a frame tripped the frame-based idle watchdog → rebuild
-        // Every reopen is the idle watchdog's: a threshold of one read error would have reopened on any.
-        assertTrue("trickle bytes (n>0) are not read errors: $log", log.none { "read failing" in it })
-        session.stop()
     }
 
     @Test(timeout = 10_000)
@@ -470,8 +317,6 @@ class PcmCaptureSessionTest {
             onLost = losses::add,
             log = log,
             rebuildAfterReadFailures = 3,
-            readErrorBackoffMs = 0,
-            pollMs = 0,
         )
 
         session.start()
@@ -496,7 +341,7 @@ class PcmCaptureSessionTest {
             logs.add(it)
             if (it == "pcm capture started") started.countDown()
         }
-        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, log = log, pollMs = 0)
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, log = log)
 
         session.start()
         await(started)
@@ -511,29 +356,6 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
-    fun rebuildsAfterConsecutiveReadFailures() {
-        val fake = FakeDevice().apply { failReads = true }
-        val gotFrame = CountDownLatch(1)
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> gotFrame.countDown() },
-            rebuildAfterReadFailures = 3,
-            readErrorBackoffMs = 0,
-            pollMs = 0,
-        )
-
-        session.start()
-        await(fake.reopened) // the rebuild has actually re-opened the device
-        assertTrue("expected a rebuild (re-open) after the failure run", fake.openCount.get() >= 2)
-
-        // Recover: set frames BEFORE clearing failReads so the loop has data the moment errors stop.
-        fake.framesToServe = 5
-        fake.failReads = false
-        await(gotFrame)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
     fun openFailureIsLostAsNotGrantedAndDoesNotRun() {
         val fake = FakeDevice(openResults = ArrayDeque(listOf(false)))
         val losses = Losses()
@@ -541,7 +363,6 @@ class PcmCaptureSessionTest {
             device = fake,
             onFrame = { _, _ -> },
             onLost = losses::add,
-            pollMs = 0,
         )
 
         session.start() // thread spawns; open() fails inside the loop
@@ -565,7 +386,6 @@ class PcmCaptureSessionTest {
                 started.incrementAndGet()
                 startedLatch.countDown()
             },
-            pollMs = 0,
         )
         okSession.start()
         await(startedLatch)
@@ -581,7 +401,6 @@ class PcmCaptureSessionTest {
             onFrame = { _, _ -> },
             onStarted = { badStarted.incrementAndGet() },
             onLost = badLosses::add,
-            pollMs = 0,
         )
         badSession.start()
         await(badLosses.lost)
@@ -620,7 +439,6 @@ class PcmCaptureSessionTest {
                 onStarted = { started.incrementAndGet() },
                 onLost = losses::add,
                 log = log,
-                pollMs = 0,
             )
 
             session.start()
@@ -641,27 +459,6 @@ class PcmCaptureSessionTest {
     }
 
     @Test(timeout = 10_000)
-    fun aFailedRebuildIsLostAsDropped() {
-        val fake = FakeDevice(openResults = ArrayDeque(listOf(true, false))).apply { failReads = true }
-        val losses = Losses()
-        val session = PcmCaptureSession(
-            device = fake,
-            onFrame = { _, _ -> },
-            onLost = losses::add,
-            rebuildAfterReadFailures = 3,
-            readErrorBackoffMs = 0,
-            pollMs = 0,
-        )
-
-        session.start()
-        await(losses.lost)
-        Thread.sleep(50) // room for a second, wrong, report to arrive
-
-        assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses.all)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
     fun anExceptionEscapingTheReadLoopIsLostAsDropped() {
         val losses = Losses()
         val released = AtomicInteger()
@@ -673,7 +470,7 @@ class PcmCaptureSessionTest {
                 released.incrementAndGet()
             }
         }
-        val session = PcmCaptureSession(device = device, onFrame = { _, _ -> }, onLost = losses::add, pollMs = 0)
+        val session = PcmCaptureSession(device = device, onFrame = { _, _ -> }, onLost = losses::add)
 
         session.start()
         await(losses.lost)
@@ -690,7 +487,7 @@ class PcmCaptureSessionTest {
     @Test(timeout = 10_000)
     fun concurrentStartStopDoesNotDeadlockOrCrash() {
         val fake = FakeDevice() // idle: read returns 0
-        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> }, pollMs = 0)
+        val session = PcmCaptureSession(device = fake, onFrame = { _, _ -> })
         val errors = CopyOnWriteArrayList<Throwable>()
 
         val workers = (0 until 4).map {
@@ -711,214 +508,48 @@ class PcmCaptureSessionTest {
         session.stop() // ensure final state is stopped
     }
 
-    /**
-     * Serves full frames of digital silence whose first sample is the next value from [frameSamples] (repeating the
-     * last one forever once the list runs out), so a test can script exactly one non-zero sample breaking a silence.
-     * [onOpen] runs on every open, so a test can see a rebuild.
-     */
-    private class SampleDevice(private val frameSamples: List<Short>, private val onOpen: () -> Unit = {}) :
-        PcmDevice {
-        private var next = 0 // capture-thread only
+    @Test(timeout = 10_000)
+    fun aStopBetweenADeliveredFrameAndItsFollowUpCarriesOutNeither() {
+        // The frame that fills the silence window is followed by a rebuild (rebuild on silence) or by the silenced
+        // loss. A stop that lands while that frame is being delivered carries out neither: no reopen, no loss.
+        for (rebuildOnSilence in listOf(true, false)) {
+            val device = SilentDevice()
+            val log = StopLog()
+            val losses = Losses()
+            lateinit var session: PcmCaptureSession
+            session = PcmCaptureSession(
+                device = device,
+                onFrame = { _, _ -> session.stop() }, // a self-stop: it signals and returns
+                onLost = losses::add,
+                log = log,
+                silenceWindowMs = PcmCaptureFormat.FRAME_MS.toLong(), // the first frame fills the window
+                rebuildOnSilence = rebuildOnSilence,
+            )
+
+            session.start()
+            await(log.stopped)
+
+            assertEquals("no rebuild (rebuildOnSilence=$rebuildOnSilence)", 1, device.openCount.get())
+            assertEquals("no loss (rebuildOnSilence=$rebuildOnSilence)", emptyList<CaptureLoss>(), losses.all)
+        }
+    }
+
+    /** Serves full frames of digital silence for as long as it is read. */
+    private class SilentDevice : PcmDevice {
+        val openCount = AtomicInteger()
 
         override fun open(): Boolean {
-            onOpen()
+            openCount.incrementAndGet()
             return true
         }
 
         override fun read(buf: ByteArray, offset: Int, length: Int): Int {
-            val sample = frameSamples[minOf(next, frameSamples.lastIndex)].toInt()
-            next++
             buf.fill(0, offset, offset + length)
-            buf[offset] = sample.toByte()
-            buf[offset + 1] = (sample shr 8).toByte()
             return length
         }
 
         override fun stop() = Unit
 
         override fun release() = Unit
-    }
-
-    private class SilenceRecorder {
-        val frames = AtomicInteger()
-        val framesAtSilenced = AtomicInteger(-1)
-        val losses = Losses()
-        val log = StopLog()
-
-        // Counts the frames delivered before the loss: none arrives after it, as capture ends there.
-        private fun lost(loss: CaptureLoss) {
-            if (loss is CaptureLoss.Silenced) framesAtSilenced.compareAndSet(-1, frames.get())
-            losses.add(loss)
-        }
-
-        fun session(
-            device: PcmDevice,
-            silenceWindowMs: Long? = SILENCE_WINDOW_MS,
-            idleRebuildMs: Long? = null,
-            rebuildOnSilence: Boolean = false,
-        ) = PcmCaptureSession(
-            device = device,
-            onFrame = { _, _ -> frames.incrementAndGet() },
-            onLost = ::lost,
-            log = log,
-            silenceWindowMs = silenceWindowMs,
-            idleRebuildMs = idleRebuildMs,
-            rebuildOnSilence = rebuildOnSilence,
-            pollMs = 0,
-        )
-    }
-
-    @Test(timeout = 10_000)
-    fun aWindowOfDigitalSilenceEndsCaptureAsSilenced() {
-        val recorder = SilenceRecorder()
-        val session = recorder.session(SampleDevice(listOf(0)))
-
-        session.start()
-        await(recorder.losses.lost)
-
-        // 2 s of 16 kHz audio in 100 ms frames is 20 frames: silenced on the 20th, and capture ends there.
-        assertEquals(FRAMES_IN_WINDOW, recorder.framesAtSilenced.get())
-        assertEquals(FRAMES_IN_WINDOW, recorder.frames.get())
-        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun oneNonZeroSampleRestartsTheSilenceWindow() {
-        val recorder = SilenceRecorder()
-        // Frame 20 opens with one non-zero sample, so it leaves 1,599 trailing zeros: the window (32,000 samples) is
-        // full only after 20 more all-zero frames (1,599 + 20 × 1,600), on frame 40.
-        val session = recorder.session(SampleDevice(List<Short>(FRAMES_IN_WINDOW - 1) { 0 } + 1.toShort() + 0))
-
-        session.start()
-        await(recorder.losses.lost)
-
-        assertEquals(40, recorder.framesAtSilenced.get())
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun aRebuildRestartsTheSilenceWindow() {
-        val recorder = SilenceRecorder()
-        val opens = AtomicInteger()
-        // The first open serves 10 silent frames and then stalls, so the idle watchdog rebuilds; the rebuilt device
-        // serves silence forever. Silenced only after a full window on the rebuilt device: 10 + 20 frames.
-        val device = object : PcmDevice {
-            private var served = 0 // capture-thread only
-
-            override fun open(): Boolean {
-                opens.incrementAndGet()
-                served = 0
-                return true
-            }
-
-            override fun read(buf: ByteArray, offset: Int, length: Int): Int {
-                if (opens.get() == 1 && served == FRAMES_IN_WINDOW / 2) return 0
-                served++
-                buf.fill(0, offset, offset + length)
-                return length
-            }
-
-            override fun stop() = Unit
-
-            override fun release() = Unit
-        }
-        val session = recorder.session(device, idleRebuildMs = 50)
-
-        session.start()
-        await(recorder.losses.lost)
-
-        assertEquals("the stall rebuilt the device", 2, opens.get())
-        assertEquals(30, recorder.framesAtSilenced.get())
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun withoutASilenceWindowDigitalSilenceKeepsCapturing() {
-        val recorder = SilenceRecorder()
-        val session = recorder.session(SampleDevice(listOf(0)), silenceWindowMs = null)
-
-        session.start()
-        while (recorder.frames.get() < 2 * FRAMES_IN_WINDOW) Thread.sleep(1)
-        session.stop()
-        await(recorder.log.stopped)
-
-        assertEquals("never silenced", -1, recorder.framesAtSilenced.get())
-        assertEquals("a requested stop is not a loss", emptyList<CaptureLoss>(), recorder.losses.all)
-    }
-
-    /**
-     * Serves digital silence on its first open and a live (non-zero) stream on every later open: a client the system
-     * silences mid-capture (Portal+ gen1 backgrounding the app), which a reopen brings back.
-     */
-    private class SilencedUntilReopened : PcmDevice {
-        val opens = AtomicInteger()
-
-        override fun open(): Boolean {
-            opens.incrementAndGet()
-            return true
-        }
-
-        override fun read(buf: ByteArray, offset: Int, length: Int): Int {
-            buf.fill(if (opens.get() == 1) 0 else 1, offset, offset + length)
-            return length
-        }
-
-        override fun stop() = Unit
-
-        override fun release() = Unit
-    }
-
-    @Test(timeout = 10_000)
-    fun withRebuildOnSilenceAWindowOfSilenceRebuildsAndCaptureGoesOn() {
-        val recorder = SilenceRecorder()
-        val device = SilencedUntilReopened()
-        val session = recorder.session(device, rebuildOnSilence = true)
-
-        session.start()
-        while (recorder.frames.get() < 3 * FRAMES_IN_WINDOW) Thread.sleep(1)
-        session.stop()
-        await(recorder.log.stopped)
-
-        assertEquals("the silence rebuilt the device, once", 2, device.opens.get())
-        assertEquals("a reopened live stream is no loss", emptyList<CaptureLoss>(), recorder.losses.all)
-    }
-
-    @Test(timeout = 10_000)
-    fun withRebuildOnSilenceASilenceThatSurvivesTheRebuildEndsCaptureAsSilenced() {
-        val recorder = SilenceRecorder()
-        val opens = AtomicInteger()
-        val session = recorder.session(SampleDevice(listOf(0)) { opens.incrementAndGet() }, rebuildOnSilence = true)
-
-        session.start()
-        await(recorder.losses.lost)
-
-        // One window on the first open, one more on the rebuilt device, then the loss.
-        assertEquals(2, opens.get())
-        assertEquals(2 * FRAMES_IN_WINDOW, recorder.framesAtSilenced.get())
-        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
-        session.stop()
-    }
-
-    @Test(timeout = 10_000)
-    fun withRebuildOnSilenceASoundAfterTheRebuildEarnsAnotherRebuild() {
-        val recorder = SilenceRecorder()
-        val opens = AtomicInteger()
-        // A window of silence (rebuild 1), one sound on the rebuilt device, then silence forever: the sound means the
-        // reopen worked, so the next window rebuilds again (open 3) before a last window ends capture.
-        val samples = List<Short>(FRAMES_IN_WINDOW) { 0 } + 1.toShort() + 0
-        val session = recorder.session(SampleDevice(samples) { opens.incrementAndGet() }, rebuildOnSilence = true)
-
-        session.start()
-        await(recorder.losses.lost)
-
-        assertEquals(3, opens.get())
-        assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), recorder.losses.all)
-        session.stop()
-    }
-
-    private companion object {
-        const val SILENCE_WINDOW_MS = 2_000L
-        const val FRAMES_IN_WINDOW = 20
     }
 }
