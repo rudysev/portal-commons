@@ -19,8 +19,9 @@
 
 - kotlinter 5.7.0 ↔ bundled ktlint 1.8.0 ↔ ktlint CLI version pinned in `.githooks/pre-commit`.
 - detekt Gradle plugin ↔ `DETEKT_VERSION` in `.githooks/pre-commit`.
-- `config/detekt/detekt.yml`, `.githooks/pre-commit`, `.shellcheckrc` are identical in portal-commons, portal-wake and
-  portal-assistant (portal-apps shares `.shellcheckrc`): change all copies together.
+- `config/detekt/detekt.yml`, `.githooks/pre-commit`, `.shellcheckrc` and the detekt block of `gradle.properties`
+  (`detekt.use.worker.api`) are identical in portal-commons, portal-wake and portal-assistant (portal-apps shares
+  `.shellcheckrc`): change all copies together.
 
 ## CI
 
