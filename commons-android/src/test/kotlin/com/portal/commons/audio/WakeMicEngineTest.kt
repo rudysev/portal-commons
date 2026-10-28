@@ -4,6 +4,7 @@ import android.content.ContextWrapper
 import com.portal.commons.PcmDevice
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
@@ -19,7 +20,8 @@ class WakeMicEngineTest {
 
     /**
      * A mic that serves one full frame per [push], which returns once the engine has finished handling it. Its next
-     * [failOpens] opens fail, and while [failReads] is set every read is a device error.
+     * [failOpens] opens fail, and while [failReads] is set every read is a device error. Records each capture thread
+     * that opens it in [openThreads].
      */
     private class SteppedDevice : PcmDevice {
         private val frames = Semaphore(0)
@@ -41,7 +43,10 @@ class WakeMicEngineTest {
 
         @Volatile var failReads = false
 
+        val openThreads = CopyOnWriteArrayList<Thread>()
+
         override fun open(): Boolean {
+            openThreads.addIfAbsent(Thread.currentThread())
             opens++
             if (failOpens == 0) return true
             failOpens--
@@ -174,15 +179,16 @@ class WakeMicEngineTest {
     }
 
     /**
-     * Drains the main-thread queue until a capture loss reaches [losses], then leaves room for a second, wrong, report.
-     * Waits on the loss itself, not a log line: the session logs before it reports the loss, which is then posted.
+     * Waits for every capture thread that opened [device] to exit, then drains the main-thread queue. A loss is posted
+     * from the capture thread, and after one the engine starts no other, so by then every report, a second, wrong,
+     * one included, is queued. Joins the thread rather than waiting on a log line: the session logs before it reports.
      */
-    private fun awaitLossThenRunPosted() {
-        await("a capture loss") {
-            runPosted()
-            losses.isNotEmpty()
+    private fun awaitCaptureEndThenRunPosted() {
+        await("the mic opened") { device.openThreads.isNotEmpty() }
+        for (thread in device.openThreads) {
+            thread.join(TimeUnit.SECONDS.toMillis(5))
+            assertFalse("capture thread ${thread.name} never ended", thread.isAlive)
         }
-        Thread.sleep(50)
         runPosted()
     }
 
@@ -370,7 +376,7 @@ class WakeMicEngineTest {
         newEngine()
         device.failOpens = 1
         engine.start()
-        awaitLossThenRunPosted()
+        awaitCaptureEndThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
     }
@@ -380,7 +386,7 @@ class WakeMicEngineTest {
         device.push()
         device.failOpens = 1
         device.failReads = true // the read-failure run ends in a rebuild whose open fails
-        awaitLossThenRunPosted()
+        awaitCaptureEndThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses)
     }
@@ -389,7 +395,7 @@ class WakeMicEngineTest {
         newEngine().start()
         repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
         device.offer() // the 20th fills the 2 s window, and capture ends inside it
-        awaitLossThenRunPosted()
+        awaitCaptureEndThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), losses)
     }
