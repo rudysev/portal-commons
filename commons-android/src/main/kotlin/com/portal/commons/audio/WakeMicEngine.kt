@@ -8,26 +8,25 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Captures the mic through one [PcmCapture] and fans each captured frame to every configured [WakeDetector].
- * Recognition policy lives behind the [WakeDetector] seam.
+ * Captures the mic through one [PcmCapture] and feeds each captured frame to its one **wake detector** (see
+ * `GLOSSARY.md`), which loads the [WakeMicConfig.model] and turns frames into wakes.
  *
- * Owns the **handoff cooldown**: one window, opened when any detector returns a wake from [WakeDetector.accept] and
- * lasting [WakeMicConfig.wakeHandoffCooldownMs] on a monotonic clock. Inside it no detector is fed a frame, so no
- * wake of any wake id arises; nor is the rest of the frame that woke fed to the other detectors. This
- * covers the ~1 frame between a match and capture actually pausing for the handoff. (Re)starting capture closes the
- * window.
+ * Owns the **handoff cooldown**: one window, opened when the wake detector returns a wake and lasting
+ * [WakeMicConfig.wakeHandoffCooldownMs] on a monotonic clock. Inside it the wake detector is fed no frame, so no
+ * wake of any wake id arises. This covers the ~1 frame between a match and capture actually pausing for the handoff.
+ * (Re)starting capture closes the window.
  *
- * Delivers each wake a detector returns to [WakeMicConfig.onWake] synchronously on the capture thread, and routes
- * [WakeDetector.Events] to the consumer: readiness and unavailability on the main thread. Each gets a log line.
+ * Delivers each wake to [WakeMicConfig.onWake] synchronously on the capture thread, and the wake detector's readiness
+ * and unavailability to the consumer on the main thread. Each gets a log line, as does each diagnostic.
  *
  * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost], at most once per
- * **capture request**, which [PcmCapture] tracks: a wedged older capture thread's frames reach no detector, and
+ * **capture request**, which [PcmCapture] tracks: a wedged older capture thread's frames reach no wake detector, and
  * its loss is never reported. Every [start] passes the same listener, so a [start] during an open capture request
  * joins it. A loss a [pause] or a newer [start] has overtaken reports nothing. After a loss
  * the engine is idle, as after [pause]; it never retries on its own, so retry policy stays with the consumer.
  *
- * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onDetectorReady],
- * [WakeMicConfig.onDetectorUnavailable]) is always posted to the main looper, never run inline, even when the event
+ * **Posting rule.** Every main-thread callback ([WakeMicConfig.onCaptureLost], [WakeMicConfig.onReady],
+ * [WakeMicConfig.onUnavailable]) is always posted to the main looper, never run inline, even when the event
  * happens on the main thread, so none runs inside a call the consumer is making to the engine (its constructor
  * included). The closed and capture request checks run when the callback is delivered, not when it is posted.
  *
@@ -41,20 +40,31 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
  *
- * The capture lifecycle (capture requests, serialized detector access, the closed state, the bounded close) lives in
- * [PcmCapture], whose `onClosed` closes the detectors; this class keeps the wake policy: the handoff cooldown, the
- * wake-word hot-swap and the routing of detector events.
+ * The capture lifecycle (capture requests, serialized wake detector calls, the closed state, the bounded close) lives
+ * in [PcmCapture], whose `onClosed` closes the wake detector; this class keeps the wake policy: the handoff cooldown,
+ * the wake-word hot-swap and the routing of the wake detector's callbacks.
+ *
+ * **The wake detector's calls.** Its start, frames and wake-word swaps all run on the capture thread at frame
+ * boundaries, never two at once, even when a wedged capture session is rebuilt while the old capture thread is still
+ * inside a call (two threads in one Vosk recognizer abort the process). Its close runs at most once, never mid-call.
+ * Readiness comes on the capture thread at the first frame after the model loads (so not while capture is paused),
+ * and a failed model load is reported from the model-load thread; both reach the consumer on the main thread.
  */
 class WakeMicEngine internal constructor(
-    context: Context,
     private val config: WakeMicConfig,
     newDevice: () -> PcmDevice,
     private val postToMain: (Runnable) -> Unit,
+    // Where the Vosk fakes replace native libvosk in tests.
+    newLoader: (WakeModel) -> VoskModelLoader,
     // Monotonic milliseconds, so a wall-clock jump can't hold the handoff cooldown open and leave the engine deaf.
     private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
 ) {
-    constructor(context: Context, config: WakeMicConfig) :
-        this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
+    constructor(context: Context, config: WakeMicConfig) : this(
+        config,
+        ::AudioRecordPcmDevice,
+        WakeCallbackThreads.mainThreadPoster(),
+        newLoader = { LibVoskModelLoader(context, it) },
+    )
 
     // The handoff cooldown is open while clock() is before this instant. Touched on the capture thread only, under
     // PcmCapture's callback lock in onStarted/onFrame.
@@ -71,17 +81,13 @@ class WakeMicEngine internal constructor(
     private val listener = object : PcmCapture.Listener {
         override fun onStarted() {
             handoffCooldownUntilMs = Long.MIN_VALUE
-            detectors.forEach { it.start() }
+            detector.start()
         }
 
         override fun onFrame(buf: ByteArray, n: Int) {
-            applyPendingWakeWords(detectors)
-            if (inHandoffCooldown()) return // no detector hears these frames
-            for (detector in detectors) {
-                val wake = detector.accept(buf, n) ?: continue
-                deliver(wake) // opens the cooldown: no other detector hears the rest of this frame
-                return
-            }
+            applyPendingWakeWords()
+            if (inHandoffCooldown()) return // the wake detector hears none of these frames
+            detector.accept(buf, n)?.let(::deliver)
         }
 
         override fun onLost(loss: CaptureLoss) {
@@ -100,36 +106,26 @@ class WakeMicEngine internal constructor(
             idleRebuildMs = CapturePolicy.DEFAULT_IDLE_REBUILD_MS,
             silence = CapturePolicy.Silence(SILENCE_WINDOW_MS),
         ),
-        onClosed = { detectors.forEach { it.close() } },
+        onClosed = { detector.close() },
     )
-
-    // Last among the fields its detectors' events read: a detector may raise one while it is being created.
-    private val detectors: List<WakeDetector> = run {
-        val host = object : WakeDetector.Host {
-            override val context: Context = context
-            override val wakeWords: List<WakeWord> = config.wakeWords
-            override val events: WakeDetector.Events = DetectorEvents()
-        }
-        config.detectors.map { it.create(host) }
-    }
 
     /** Posts [callback] to the main thread, never inline. It runs only if the engine is still open when delivered. */
     private fun deliverOnMain(callback: () -> Unit) = postToMain { if (!capture.isClosed) callback() }
 
-    /** Routes [WakeDetector.Events] to the consumer. */
-    private inner class DetectorEvents : WakeDetector.Events {
-        override fun onReady(detectorId: String) {
-            config.log("wake detector ready ($detectorId)")
-            deliverOnMain { config.onDetectorReady(detectorId) }
-        }
-
-        override fun onUnavailable(detectorId: String) {
-            config.log("wake unavailable ($detectorId) — detector idle")
-            deliverOnMain { config.onDetectorUnavailable(detectorId) }
-        }
-
-        override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
-    }
+    // Last among the fields its callbacks read: the wake detector may report unavailable while it is being created.
+    private val detector: WakeDetector = WakeDetector(
+        newLoader(config.model),
+        config.wakeWords,
+        onReady = {
+            config.log("wake detector ready")
+            deliverOnMain { config.onReady() }
+        },
+        onUnavailable = {
+            config.log("wake unavailable — detector idle")
+            deliverOnMain { config.onUnavailable() }
+        },
+        diagnostic = config.log,
+    )
 
     /**
      * Opens the handoff cooldown and delivers [event] to [WakeMicConfig.onWake]. Runs in onFrame, under PcmCapture's
@@ -138,7 +134,7 @@ class WakeMicEngine internal constructor(
      */
     private fun deliver(event: WakeEvent) {
         handoffCooldownUntilMs = clock() + config.wakeHandoffCooldownMs
-        config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
+        config.log("wake detected → ${event.wakeId} [${event.transcript}]")
         if (capture.isClosed) {
             config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
             return
@@ -159,7 +155,10 @@ class WakeMicEngine internal constructor(
         capture.start(listener)
     }
 
-    /** Hot-swap wake words without restarting capture. See [WakeDetector.updateWakeWords]. */
+    /**
+     * Hot-swap wake words without restarting capture: the wake detector rebuilds its grammar on the model it has,
+     * before its next frame.
+     */
     fun updateWakeWords(words: List<WakeWord>) {
         pendingWakeWords.set(words)
     }
@@ -173,24 +172,24 @@ class WakeMicEngine internal constructor(
     /**
      * Terminal and idempotent: after it, [start] and [pause] are logged no-ops and no callback is delivered.
      *
-     * Bounded waits: the capture stop and the wait for a detector call to finish (which covers a wake already
+     * Bounded waits: the capture stop and the wait for a wake detector call to finish (which covers a wake already
      * being delivered, since a wake is delivered inside one) share one deadline, [PcmCapture.STOP_DEADLINE_MS],
      * and the mic slot is free when it returns (unless a stuck capture thread's forced device release hangs too).
-     * No wake delivery begins after it returns, even from a capture thread it gave up waiting for. Detectors still
-     * busy then, or busy in the calling thread (a close from inside the wake callback), are closed by the capture
-     * thread as it leaves them, never in the middle of a call; a close that runs out of time logs a `🔴` line.
-     * If that call never returns, the detectors' native resources leak until the process dies.
+     * No wake delivery begins after it returns, even from a capture thread it gave up waiting for. A wake detector
+     * still busy then, or busy in the calling thread (a close from inside the wake callback), is closed by the capture
+     * thread as it leaves that call, never in the middle of it; a close that runs out of time logs a `🔴` line.
+     * If that call never returns, the wake detector's native resources leak until the process dies.
      *
-     * Not bounded: the detectors' own [WakeDetector.close]. When the wait succeeds it runs on the calling thread after
+     * Not bounded: the wake detector's own close. When the wait succeeds it runs on the calling thread after
      * the deadline's waits, however long it takes. Freeing the Vosk model alone takes ~0.5 s on Portal+ gen1, so a
      * close from the main thread usually blocks it past the deadline.
      */
     fun close() = capture.close()
 
-    private fun applyPendingWakeWords(all: List<WakeDetector>) {
+    private fun applyPendingWakeWords() {
         val words = pendingWakeWords.getAndSet(null) ?: return
         config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
-        all.forEach { it.updateWakeWords(words) }
+        detector.updateWakeWords(words)
     }
 
     companion object {

@@ -26,7 +26,7 @@ import org.json.JSONObject
  *     restarting and the reset may **never** fire. That is correct, not a stall: those endpoints are what bound memory.
  *
  * Diagnostics (`near-miss …`, `flushed final …`, the idle resets) go through a plain `(String) -> Unit`, so it
- * doesn't depend on [WakeDetector.Events]. Single-threaded by contract: owned and driven on the capture thread only.
+ * depends on no callback interface. Single-threaded by contract: owned and driven on the capture thread only.
  */
 internal class WakeDecoder private constructor(
     private val model: VoskModel,
@@ -53,7 +53,7 @@ internal class WakeDecoder private constructor(
         val words = parseResult(decoder.finalResult())
         val transcript = render(words)
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
-            is WakeMatcher.Outcome.Match -> WakeEvent(VoskWakeDetector.ID, o.id, transcript)
+            is WakeMatcher.Outcome.Match -> WakeEvent(o.id, transcript)
 
             is WakeMatcher.Outcome.NearMiss -> {
                 diagnostic("near-miss [$transcript] rejected: ${o.reason}")

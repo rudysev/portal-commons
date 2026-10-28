@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The Vosk detector, tested through the [WakeDetector] interface only. Native libvosk is replaced at the seam
+ * The [WakeDetector], tested through its own methods only. Native libvosk is replaced at the seam
  * ([VoskModelLoader] / [VoskModel] / [VoskDecoder]) by fakes, so model handoff, readiness, the pre-ready buffer +
  * replay and the [WakeDecoder] underneath all run for real. Decoding itself is covered by [WakeDecoderTest]. Real
  * `org.json` on the JVM (see `testOptions` in build.gradle.kts).
@@ -17,7 +17,7 @@ import org.junit.Test
  * Readiness is asserted only after a frame has been fed, so these tests hold whether the detector signals on
  * the model-load thread or at the next frame boundary.
  */
-class VoskWakeDetectorTest {
+class WakeDetectorTest {
 
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()
@@ -27,7 +27,7 @@ class VoskWakeDetectorTest {
         callbacks.detector(loader, words)
 
     /** A detector whose model has loaded and which has been started, with the callback log cleared. */
-    private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): VoskWakeDetector = detector(words).also {
+    private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): WakeDetector = detector(words).also {
         loader.complete(model)
         it.start()
         it.accept(frame(TAG_PRIME), FRAME)
@@ -202,7 +202,7 @@ class VoskWakeDetectorTest {
         assertEquals(1, model.closeCount)
     }
 
-    private fun wake(wakeId: String, transcript: String) = WakeEvent(VoskWakeDetector.ID, wakeId, transcript)
+    private fun wake(wakeId: String, transcript: String) = WakeEvent(wakeId, transcript)
 
     private fun warmUp() = List(WakeDecoder.WARMUP_SILENCE_FRAMES) { "silence" }
 

@@ -306,7 +306,7 @@ class WakeDecoderTest {
         assertEquals(1, model.closeCount)
     }
 
-    private fun wake(wakeId: String, transcript: String) = WakeEvent(VoskWakeDetector.ID, wakeId, transcript)
+    private fun wake(wakeId: String, transcript: String) = WakeEvent(wakeId, transcript)
 
     private fun warmUp() = List(WakeDecoder.WARMUP_SILENCE_FRAMES) { "silence" }
 

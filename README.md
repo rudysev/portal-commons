@@ -29,31 +29,31 @@ All package `com.portal.commons`.
 | Class | Purpose |
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
-| `WakeMicEngine` | Mic + capture thread; fans PCM frames to one or more [WakeDetector]s, and owns the **handoff cooldown** (one window after any wake: no detector is fed frames, so no further wake arises; `wakeHandoffCooldownMs`). Consumer wiring via [WakeMicConfig] ([WakeEvent], [WakeDetectors]). `start()` / `pause()` / `close()`: see below. |
-| `WakeDetector` | Recognition seam the engine drives (each frame in, the wake it completed, if any, back from `accept`; ready / unavailable / diagnostic events out). Never two calls at once, and never closed mid-call. |
-| `WakeDetectors.vosk()` | The Vosk detector, one module behind this factory: model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the [WakeMatcher] call. Its classes are `internal`; native libvosk sits behind an internal seam so the policy is JVM-tested. |
+| `WakeMicEngine` | Mic + capture thread; feeds PCM frames to its one **wake detector** (Vosk), and owns the **handoff cooldown** (one window after a wake: the wake detector is fed no frames, so no further wake arises; `wakeHandoffCooldownMs`). Consumer wiring via `WakeMicConfig` (`WakeEvent(wakeId, transcript)`, `onReady()` / `onUnavailable()`). `start()` / `pause()` / `close()`: see below. |
+| `WakeModel` | The **wake model** `WakeMicConfig.model` names: `WakeModel.Bundled` (the APK's `assets/model-en-us`, unpacked to filesDir; portal-wake) or `WakeModel.Unpacked(dir)` (an already-unpacked model on disk, e.g. downloaded at runtime; portal-assistant on gen2). |
+| Wake detector (`internal`) | Model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the `WakeMatcher` call. Native libvosk sits behind an internal seam, so the policy and the engine are JVM-tested over fakes. |
 
 ### Wake mic engine lifecycle
 
 - **Capture request** (defined in `GLOSSARY.md`): the span from a `start()` that begins capture to the next
   `pause()`, `close()` or capture loss. The engine captures through one `PcmCapture`, which binds each request's
   callbacks to that request and captures it on a fresh device. Every `start()` passes the engine's one listener, so a
-  `start()` joins an open request unless a loss has been raised for it. A wedged older capture thread never feeds a
-  detector once a newer request has begun.
+  `start()` joins an open request unless a loss has been raised for it. A wedged older capture thread never feeds the
+  wake detector once a newer request has begun.
 - **Capture loss** (defined in `GLOSSARY.md`) arrives as `onCaptureLost(CaptureLoss)`, at most once per capture
   request. A loss that a `pause()` or a newer `start()` has overtaken reports nothing, even if it was already posted.
   After a loss the engine is idle, as after `pause()`, and never retries on its own: retry by calling `start()`.
   `start()` returns nothing.
-- **Posting rule.** `onCaptureLost`, `onDetectorReady` and `onDetectorUnavailable` are always posted to the main
+- **Posting rule.** `onCaptureLost`, `onReady` and `onUnavailable` are always posted to the main
   looper, never run inline, even from the main thread or the engine's constructor. `onWake` stays synchronous on the
   capture thread, so the consumer can pause within about one frame.
 - **Closed state.** `close()` is terminal and idempotent. After it nothing is delivered, including callbacks already
   posted, and `start()` / `pause()` are logged no-ops.
 - **Bounded close.** `close()` is synchronous and safe from any thread, including the wake callback; the mic slot is
-  free when it returns. The capture stop, the wait for a running detector call and the wait for a wake being
-  delivered share one ~400 ms deadline (`PcmCapture.STOP_DEADLINE_MS`). Detectors still busy then are closed
-  by the capture thread as it leaves them, with a `🔴` log line; if that call never returns, their native resources
-  leak until the process dies. The detector close itself is not under the deadline: when the wait succeeds it runs
+  free when it returns. The capture stop, the wait for a running wake detector call and the wait for a wake being
+  delivered share one ~400 ms deadline (`PcmCapture.STOP_DEADLINE_MS`). A wake detector still busy then is closed
+  by the capture thread as it leaves that call, with a `🔴` log line; if that call never returns, its native resources
+  leak until the process dies. The wake detector's close itself is not under the deadline: when the wait succeeds it runs
   on the calling thread, and freeing the Vosk model takes ~0.5 s on Portal+ gen1.
 
 ## Build / test (standalone)

@@ -7,15 +7,18 @@ import org.vosk.Recognizer
 import java.io.File
 
 /**
- * The libvosk [VoskModelLoader]. Two sources: null [modelDir] = the bundled `assets/[MODEL_ASSET]`, unpacked
- * to filesDir (portal-wake); a non-null dir = an already-unpacked model on disk, loaded directly — for a
+ * The libvosk [VoskModelLoader] for a [WakeModel]: [WakeModel.Bundled] = the bundled `assets/[MODEL_ASSET]`, unpacked
+ * to filesDir (portal-wake); [WakeModel.Unpacked] = an already-unpacked model on disk, loaded directly — for a
  * consumer that **downloads** the model at runtime instead of shipping it in the APK (portal-assistant on
  * gen2). A dir that isn't a complete model fails, same as a missing asset.
  */
-internal class LibVoskModelLoader(private val context: Context, private val modelDir: File?) : VoskModelLoader {
+internal class LibVoskModelLoader(private val context: Context, private val model: WakeModel) : VoskModelLoader {
 
     override fun load(onLoaded: (VoskModel) -> Unit, onFailed: () -> Unit) {
-        if (modelDir != null) loadFromDir(modelDir, onLoaded, onFailed) else unpackFromAssets(onLoaded, onFailed)
+        when (model) {
+            WakeModel.Bundled -> unpackFromAssets(onLoaded, onFailed)
+            is WakeModel.Unpacked -> loadFromDir(model.dir, onLoaded, onFailed)
+        }
     }
 
     /** Bundled-asset source (portal-wake): unpack `assets/[MODEL_ASSET]` into filesDir. */
@@ -35,7 +38,7 @@ internal class LibVoskModelLoader(private val context: Context, private val mode
      */
     private fun loadFromDir(dir: File, onLoaded: (VoskModel) -> Unit, onFailed: () -> Unit) {
         // A complete Vosk model has all of [MODEL_DIRS]; a partial dir (e.g. a truncated download) fails fast
-        // here instead of after a slow native Model() load — defense in depth for any caller passing modelDir.
+        // here instead of after a slow native Model() load — defense in depth for any unpacked model.
         if (MODEL_DIRS.any { !File(dir, it).isDirectory }) {
             onFailed()
             return
