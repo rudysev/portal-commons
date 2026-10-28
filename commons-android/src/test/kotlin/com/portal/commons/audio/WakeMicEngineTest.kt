@@ -273,6 +273,29 @@ class WakeMicEngineTest {
         assertEquals(0, ready.get())
     }
 
+    @Test fun theEngineNeverWakesAfterTheModelFailsToLoad() {
+        newEngine().start()
+        loader.fail()
+        runPosted()
+        pushWake(2)
+
+        assertEquals(1, unavailable.get())
+        assertEquals(emptyList<WakeEvent>(), wakes)
+    }
+
+    @Test fun theEngineNeverWakesAfterItsFirstDecoderCannotBeBuilt() {
+        model.failBuilds = true
+        newEngine().start()
+        loader.complete(model)
+        device.push(frame(2))
+        runPosted()
+        model.failBuilds = false
+        pushWake(3)
+
+        assertEquals(1, unavailable.get())
+        assertEquals(emptyList<WakeEvent>(), wakes)
+    }
+
     @Test fun aModelThatFailsWhileTheEngineIsBeingConstructedIsPostedNotDeliveredInline() {
         newEngine(loader = FakeVoskLoader(throwOnLoad = true))
         assertEquals(0, unavailable.get())
