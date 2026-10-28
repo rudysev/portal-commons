@@ -38,7 +38,7 @@ android {
 
   testOptions {
     // Use the bundled org.json (testRuntimeOnly) instead of android.jar's throwing stubs, so the
-    // Vosk detector's JSON parsing can be exercised in plain JVM unit tests.
+    // wake decoder's JSON parsing can be exercised in plain JVM unit tests.
     unitTests.isReturnDefaultValues = true
   }
 }

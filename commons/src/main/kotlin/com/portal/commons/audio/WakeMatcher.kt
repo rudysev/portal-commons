@@ -54,7 +54,7 @@ object WakeMatcher {
     const val LEAD_MIN_CONF = 0.80
 
     /**
-     * Recognizer variants accepted for a declared lead word (open recognition mishears it). The lead itself
+     * Decoded variants accepted for a declared lead word (open recognition mishears it). The lead itself
      * is **declared by the wake plugin** (e.g. "hey", "hi" — the first word of its phrase); this map only
      * adds known mishearings on top, so a lead with no entry matches itself only. "hey" tolerates "hay"
      * (Vosk's frequent mishearing); `a`, `hi`, and `he` were deliberately *not* added to "hey" as
@@ -69,7 +69,7 @@ object WakeMatcher {
     fun acceptedLeads(w: WakeWord): Set<String>? = w.lead?.let { LEAD_ALIASES[it] ?: setOf(it) }
 
     /**
-     * Vosk's "unknown" escape token — the single source of truth for it: the Vosk detector's grammar adds
+     * Vosk's "unknown" escape token — the single source of truth for it: the wake decoder's grammar adds
      * this exact string to the grammar and this gate rejects it, so the two can't drift. Its presence in a
      * final decode means non-wake audio was captured in the same window — contamination a **strict** route
      * rejects, since a genuine close-mic wake never decodes one.
@@ -78,7 +78,7 @@ object WakeMatcher {
 
     private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
 
-    /** One recognized word and its confidence (−1 when the recognizer gave no per-word score). */
+    /** One recognized word and its confidence (−1 when the Decoder gave no per-word score). */
     data class RecWord(val word: String, val conf: Double)
 
     /**
@@ -226,12 +226,12 @@ object WakeMatcher {
     private fun underFloor(keyword: RecWord, w: WakeWord): String =
         "'${w.keyword}' ${conf(keyword.conf)} under ${w.minConf} floor"
 
-    /** Render a confidence for a log reason (`conf%`, or `?` when the recognizer gave no score). */
+    /** Render a confidence for a log reason (`conf%`, or `?` when the Decoder gave no score). */
     private fun conf(c: Double): String = if (c < 0) "?" else "${(c * PERCENT).toInt()}%"
 
     /**
      * A genuine "hey jarvis" never also contains "alexa": a decode carrying a *different* registered wake
-     * keyword is suspect. Sees only the active [all] list (= the recognizer's grammar keywords), so an
+     * keyword is suspect. Sees only the active [all] list (= the Decoder's grammar keywords), so an
      * unregistered keyword wouldn't decode here anyway — the clean-phrase gate is the primary defense.
      */
     private fun containsRivalKeyword(words: List<RecWord>, self: WakeWord, all: List<WakeWord>): Boolean {

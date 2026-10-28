@@ -412,7 +412,7 @@ class PcmCaptureSessionTest {
     fun stopDuringOpenFiresNeitherOnStartedNorOnLost() {
         // A stop() that lands while open() is in flight must not start the consumer: onStarted is a callback like
         // any other. On gen2 a pause mid-open let the stopping thread run Vosk's reset + warm-up past the stop
-        // join, and the fresh session then ran the same recognizer on a second thread — a native abort. Nor is it
+        // join, and the fresh session then ran the same Decoder on a second thread — a native abort. Nor is it
         // a loss, whether the open then succeeds or fails: the stop was asked for.
         for (opened in listOf(true, false)) {
             val inOpen = CountDownLatch(1)
