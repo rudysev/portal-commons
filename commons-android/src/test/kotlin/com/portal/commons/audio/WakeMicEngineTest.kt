@@ -173,9 +173,16 @@ class WakeMicEngineTest {
         }
     }
 
-    /** Waits for the capture thread to log [line], then drains the main-thread queue. */
-    private fun awaitLogThenRunPosted(line: String) {
-        await("logged $line") { line in logs }
+    /**
+     * Drains the main-thread queue until a capture loss reaches [losses], then leaves room for a second, wrong, report.
+     * Waits on the loss itself, not a log line: the session logs before it reports the loss, which is then posted.
+     */
+    private fun awaitLossThenRunPosted() {
+        await("a capture loss") {
+            runPosted()
+            losses.isNotEmpty()
+        }
+        Thread.sleep(50)
         runPosted()
     }
 
@@ -363,9 +370,7 @@ class WakeMicEngineTest {
         newEngine()
         device.failOpens = 1
         engine.start()
-        awaitLogThenRunPosted("pcm open failed")
-        Thread.sleep(50) // room for a second, wrong, report to arrive
-        runPosted()
+        awaitLossThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.NotGranted("microphone unavailable")), losses)
     }
@@ -375,7 +380,7 @@ class WakeMicEngineTest {
         device.push()
         device.failOpens = 1
         device.failReads = true // the read-failure run ends in a rebuild whose open fails
-        awaitLogThenRunPosted("pcm capture stopped")
+        awaitLossThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.Dropped("microphone unavailable on rebuild")), losses)
     }
@@ -384,9 +389,7 @@ class WakeMicEngineTest {
         newEngine().start()
         repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
         device.offer() // the 20th fills the 2 s window, and capture ends inside it
-        awaitLogThenRunPosted("pcm capture stopped")
-        Thread.sleep(50) // room for a second, wrong, report to arrive
-        runPosted()
+        awaitLossThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), losses)
     }
