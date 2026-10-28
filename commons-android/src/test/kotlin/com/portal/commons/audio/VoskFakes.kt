@@ -160,7 +160,7 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
 }
 
 /**
- * Records the Vosk detector's readiness, unavailability and diagnostics as lines: `ready`, `unavailable`, or the
+ * Records the wake detector's readiness, unavailability and diagnostics as lines: `ready`, `unavailable`, or the
  * diagnostic.
  */
 internal class RecordingCallbacks {

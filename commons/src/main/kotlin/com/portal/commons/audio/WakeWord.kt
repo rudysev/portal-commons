@@ -1,12 +1,12 @@
 package com.portal.commons.audio
 
 /**
- * One wake phrase the recognizer listens for.
+ * One wake phrase the wake detector listens for.
  *
  * This is intentionally decoupled from *what happens* on a match — routing/handoff lives in the consuming
  * app (e.g. portal-wake's WakeTarget), which pairs a [WakeWord] with the app that should be launched.
  * Keeping the matcher target-agnostic is what lets wake words come from anywhere (built-in defaults
- * today, runtime-discovered plugin apps tomorrow) without touching the recognizer.
+ * today, runtime-discovered plugin apps tomorrow) without touching the wake detector.
  *
  * A wake word is a [keyword] (the salient word the matcher spots) optionally preceded by a [lead] word
  * (e.g. "hey", "hi"). The lead is **declared by the plugin** (it's the leading word of the phrase it
