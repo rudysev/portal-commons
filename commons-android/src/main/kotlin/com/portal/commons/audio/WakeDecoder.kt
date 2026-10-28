@@ -8,8 +8,22 @@ import org.json.JSONObject
  * The **wake decoder**: one Vosk **Decoder** at a time for the current wake words, and the judgement of each decode
  * it finalizes as a wake, a near-miss or nothing. It owns the adopted [VoskModel] and the live [VoskDecoder] (and
  * closes both), builds and warms the grammar, parses Vosk's final and partial JSON, calls [WakeMatcher], and bounds
- * the native lattice with the idle reset ([IdleResetPolicy]), so every flush point (endpoint, reset, new Decoder,
- * capture (re)start) is internal to it.
+ * the native lattice with the idle reset, so every flush point (endpoint, reset, new Decoder, capture (re)start) is
+ * internal to it.
+ *
+ * **Idle reset.** The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar Decoder can
+ * go a long time without finalizing, and the never-bounded lattice grows ~3.8 MB/min (measured on-device). A Decoder
+ * reset flushes it — but reset also discards the in-flight partial, so one that lands mid "hey jarvis" throws away the
+ * already-decoded "hey" and the wake vanishes without even a near-miss. So the reset is a **backstop**, issued only
+ * when it is both needed and safe:
+ *  1. **Reset only when the Decoder is quiet.** Once the lattice has gone [QUIET_RESET_MS] unflushed, the reset waits
+ *     for a frame with no in-flight partial so it can't bisect an utterance. [FORCE_RESET_MS] is the hard cap: past it
+ *     the reset fires even mid-decode, so pathological continuous noise (a TV that never yields a quiet frame) still
+ *     can't grow the lattice unbounded — worst case it holds ~[FORCE_RESET_MS] of audio (< 4 MB).
+ *  2. **Natural endpoints are the primary bound; this reset is only the fallback.** Every finalized decode means Kaldi
+ *     already flushed the lattice, which restarts the clock — so the idle reset fires only after [QUIET_RESET_MS] with
+ *     *no* endpoint at all. In any room with ambient sound Vosk endpoints every few seconds, so the clock keeps
+ *     restarting and the reset may **never** fire. That is correct, not a stall: those endpoints are what bound memory.
  *
  * Diagnostics (`near-miss …`, `flushed final …`, the idle resets) go through a plain `(String) -> Unit`, so it
  * doesn't depend on [WakeDetector.Events]. Single-threaded by contract: owned and driven on the capture thread only.
@@ -23,7 +37,7 @@ internal class WakeDecoder private constructor(
     // Monotonic milliseconds, for the idle-reset clock.
     private val clock: () -> Long,
 ) {
-    private val idleReset = IdleResetPolicy().also { it.noteFlushed(clock()) }
+    private var flushedAtMs = clock() // last instant the lattice was known bounded (reset, new Decoder, or endpoint)
 
     /**
      * Feed one frame, running the idle reset check first. When it finalizes a decode (Vosk endpointed) the lattice
@@ -35,7 +49,7 @@ internal class WakeDecoder private constructor(
     fun accept(buf: ByteArray, n: Int): WakeEvent? {
         maybeIdleReset()
         if (!decoder.acceptFrame(buf, n)) return null
-        idleReset.noteFlushed(clock())
+        flushedAtMs = clock()
         val words = parseResult(decoder.finalResult())
         val transcript = render(words)
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
@@ -66,13 +80,13 @@ internal class WakeDecoder private constructor(
             decoder = dec
             runCatching { old.close() }
         }
-        idleReset.noteFlushed(clock())
+        flushedAtMs = clock()
     }
 
     /** Reset and re-warm the Decoder and restart the idle-reset clock (a capture (re)start). */
     fun reset() {
         flush()
-        idleReset.noteFlushed(clock())
+        flushedAtMs = clock()
     }
 
     /** Close the Decoder and the model. */
@@ -81,17 +95,27 @@ internal class WakeDecoder private constructor(
         runCatching { model.close() }
     }
 
+    /**
+     * The idle reset check (rules in the class KDoc). The partial — a native call — is queried only once
+     * [QUIET_RESET_MS] has actually elapsed, not per frame.
+     */
     private fun maybeIdleReset() {
         val now = clock()
-        val decision = idleReset.decide(now, ::isMidUtterance)
-        if (decision == IdleResetPolicy.Decision.KEEP) return
-        flush()
-        idleReset.noteFlushed(now)
-        when (decision) {
-            IdleResetPolicy.Decision.RESET -> diagnostic("idle reset (bounding Vosk lattice)")
-            IdleResetPolicy.Decision.FORCE_RESET -> diagnostic("idle reset forced mid-decode (bounding Vosk lattice)")
-            IdleResetPolicy.Decision.KEEP -> {}
+        val unflushedMs = now - flushedAtMs
+        val message = when {
+            unflushedMs < QUIET_RESET_MS -> return
+
+            // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a real
+            // "hey" is still settling. FORCE_RESET_MS caps how long that deferral can hold the reset off.
+            !isMidUtterance() -> "idle reset (bounding Vosk lattice)"
+
+            unflushedMs >= FORCE_RESET_MS -> "idle reset forced mid-decode (bounding Vosk lattice)"
+
+            else -> return
         }
+        flush()
+        flushedAtMs = now
+        diagnostic(message)
     }
 
     /**
@@ -110,6 +134,12 @@ internal class WakeDecoder private constructor(
 
     companion object {
         const val WARMUP_SILENCE_FRAMES = 10 // ~1 s of silence to settle the online decoder after a reset
+
+        /** Unflushed this long with no natural endpoint → idle reset at the next quiet frame. */
+        private const val QUIET_RESET_MS = 25_000L
+
+        /** Hard cap on unflushed time — idle reset even mid-decode past here (~3.8 MB/min → < 4 MB held). */
+        private const val FORCE_RESET_MS = 60_000L
 
         private const val NO_CONF = -1.0 // sentinel: the decoder gave no per-word confidence
 

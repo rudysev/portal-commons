@@ -31,6 +31,12 @@ class WakeDecoderTest {
         return accept(frame(3, endpoint = true), FRAME)
     }
 
+    /** Feed one non-finalizing frame at [ms]. */
+    private fun WakeDecoder.frameAt(ms: Long, tag: Int = 2) {
+        now = ms
+        accept(frame(tag), FRAME)
+    }
+
     // ---- final-result decoding → wake / near-miss / flushed final -----------------------------------
 
     @Test fun confidentWakeIsReturnedWithItsDecode() {
@@ -84,15 +90,70 @@ class WakeDecoderTest {
         assertEquals(emptyList<String>(), diagnostics)
     }
 
-    // ---- partial-result decoding: only a non-empty partial holds the idle reset off -----------------
+    // ---- idle reset: the timer ----------------------------------------------------------------------
 
-    @Test fun anyNonEmptyPartialDefersTheIdleReset() {
+    @Test fun keepsBeforeIdleElapses() {
         val d = ready()
-        listOf("""{"partial" : "hey jar"}""", """{"partial" : "[unk]"}""").forEach {
-            model.live.partial = it
-            now += IDLE
-            d.accept(frame(2), FRAME)
+        d.frameAt(0)
+        d.frameAt(IDLE - 1)
+        assertEquals(emptyList<String>(), diagnostics)
+    }
+
+    @Test fun resetsAtIdleWhenDecoderQuiet_thenWarmsUpBeforeTheFrame() {
+        val d = ready()
+        d.frameAt(IDLE, tag = 7)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+        assertEquals(warmUp() + "reset" + warmUp() + "frame:7", model.live.log)
+    }
+
+    @Test fun captureRestartRestartsTheClock() {
+        val d = ready()
+        now = 10_000
+        d.reset()
+        d.frameAt(10_000 + IDLE - 1)
+        assertEquals(emptyList<String>(), diagnostics)
+        d.frameAt(10_000 + IDLE)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+    }
+
+    @Test fun wakeWordSwapRestartsTheClock() {
+        val d = ready()
+        now = 10_000
+        d.updateWakeWords(listOf(ALEXA))
+        d.frameAt(10_000 + IDLE - 1)
+        assertEquals(emptyList<String>(), diagnostics)
+        d.frameAt(10_000 + IDLE)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+    }
+
+    // ---- idle reset: natural endpoints keep pushing it back -----------------------------------------
+
+    @Test fun naturalEndpointsKeepDeferringTheReset() {
+        val d = ready()
+        // A quiet room endpoints every ~5 s; each one restarts the clock, so the reset never becomes due no
+        // matter how long capture runs (100 s here, well past the force cap).
+        repeat(20) {
+            now += 5_000
+            d.accept(frame(3, endpoint = true), FRAME)
         }
+        assertEquals(emptyList<String>(), diagnostics)
+        // Endpoints stop (continuous non-endpointing audio) → due IDLE after the last one.
+        val lastEndpoint = now
+        d.frameAt(lastEndpoint + IDLE - 1)
+        assertEquals(emptyList<String>(), diagnostics)
+        d.frameAt(lastEndpoint + IDLE)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+    }
+
+    // ---- idle reset: never mid-utterance (until the backstop) ---------------------------------------
+
+    @Test fun defersWhileAnyPartialIsInFlight() {
+        val d = ready()
+        model.live.partial = """{"partial" : "hey jar"}"""
+        d.frameAt(IDLE)
+        // A bare "[unk]" partial still counts — a real "hey" may still be settling.
+        model.live.partial = """{"partial" : "[unk]"}"""
+        d.frameAt(IDLE + 1)
         assertEquals(emptyList<String>(), diagnostics)
     }
 
@@ -101,10 +162,64 @@ class WakeDecoderTest {
         val quiet = listOf("""{"partial" : ""}""", """{"partial" : "   "}""", """{}""", "not json")
         quiet.forEach {
             model.live.partial = it
-            now += IDLE
-            d.accept(frame(2), FRAME)
+            d.frameAt(now + IDLE)
         }
         assertEquals(List(quiet.size) { IDLE_RESET }, diagnostics)
+    }
+
+    @Test fun deferredResetFiresAtTheNextQuietMoment() {
+        val d = ready()
+        model.live.partial = """{"partial" : "hey jar"}"""
+        d.frameAt(IDLE) // "hey jar…" in flight — hold
+        assertEquals(emptyList<String>(), diagnostics)
+        model.live.partial = """{"partial" : ""}"""
+        d.frameAt(IDLE + 900) // utterance over — reset now
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+    }
+
+    @Test fun forcesResetPastBackstopEvenMidUtterance() {
+        val d = ready()
+        model.live.partial = """{"partial" : "hey jar"}"""
+        d.frameAt(FORCE - 1)
+        assertEquals(emptyList<String>(), diagnostics)
+        d.frameAt(FORCE)
+        assertEquals(listOf(FORCED_RESET), diagnostics)
+    }
+
+    @Test fun quietResetPastBackstopIsAnOrdinaryReset() {
+        // "forced mid-decode" means "clipped speech is possible" in the log — a quiet late reset isn't that.
+        ready().frameAt(FORCE + 1)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+    }
+
+    @Test fun clockRestartsAfterQuietReset() {
+        val d = ready()
+        d.frameAt(IDLE)
+        d.frameAt(IDLE + IDLE - 1)
+        assertEquals(listOf(IDLE_RESET), diagnostics)
+        d.frameAt(IDLE + IDLE)
+        assertEquals(listOf(IDLE_RESET, IDLE_RESET), diagnostics)
+    }
+
+    @Test fun clockRestartsAfterForcedReset() {
+        val d = ready()
+        model.live.partial = """{"partial" : "hey jar"}"""
+        d.frameAt(FORCE)
+        d.frameAt(FORCE + IDLE - 1)
+        d.frameAt(FORCE + IDLE) // deferred again, not forced
+        assertEquals(listOf(FORCED_RESET), diagnostics)
+        d.frameAt(FORCE + FORCE)
+        assertEquals(listOf(FORCED_RESET, FORCED_RESET), diagnostics)
+    }
+
+    @Test fun partialIsQueriedOnlyOnceTheResetIsDue() {
+        // The partial is a native call; it must not be made on every frame.
+        val d = ready()
+        d.frameAt(0)
+        d.frameAt(IDLE - 1)
+        assertEquals(0, model.live.partialQueries)
+        d.frameAt(IDLE)
+        assertEquals(1, model.live.partialQueries)
     }
 
     // ---- grammar ------------------------------------------------------------------------------------
@@ -197,7 +312,9 @@ class WakeDecoderTest {
 
     private companion object {
         const val IDLE = 25_000L
+        const val FORCE = 60_000L
         const val IDLE_RESET = "idle reset (bounding Vosk lattice)"
+        const val FORCED_RESET = "idle reset forced mid-decode (bounding Vosk lattice)"
 
         val JARVIS_LENIENT = WakeWord.fromPhrase("hey jarvis", id = "jarvis", minConf = WakeMatcher.BASELINE_CONF)!!
         val COMPUTER = WakeWord.fromPhrase("computer", minConf = WakeMatcher.BASELINE_CONF)!!
