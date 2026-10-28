@@ -2,19 +2,24 @@ package com.portal.commons.audio
 
 import android.content.ContextWrapper
 import com.portal.commons.PcmDevice
+import com.portal.commons.audio.ScriptedDecoder.Companion.frame
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
 /**
- * Drives a real [WakeMicEngine] capture thread one frame at a time with a [SteppedDevice], a [FakeDetector] and a
- * hand-set clock, so the handoff cooldown and the consumer callback routing are observable from outside.
+ * Drives a real [WakeMicEngine] capture thread one frame at a time with a [SteppedDevice] and a hand-set clock, so the
+ * handoff cooldown and the consumer callback routing are observable from outside. The detector is the real Vosk wake
+ * detector over the Vosk fakes ([FakeVoskLoader] / [FakeVoskModel] / [ScriptedDecoder]): a wake is a confident
+ * "hey jarvis" final queued on the model and decoded at an endpoint frame, and readiness, unavailability and the
+ * pre-ready replay are the detector's own. Only the tests of several detectors at once use a [FakeDetector].
  */
 class WakeMicEngineTest {
 
@@ -25,17 +30,22 @@ class WakeMicEngineTest {
      */
     private class SteppedDevice : PcmDevice {
         private val frames = Semaphore(0)
+        private val queued = ConcurrentLinkedQueue<ByteArray>()
         private val handled = Semaphore(0)
 
         @Volatile private var frameOut = false
 
-        fun push() {
-            offer()
+        /** Serves [frame] (all-zero silence by default) and waits until the engine has finished handling it. */
+        fun push(frame: ByteArray = ByteArray(FRAME)) {
+            offer(frame)
             assertTrue("engine never finished the frame", handled.tryAcquire(2, TimeUnit.SECONDS))
         }
 
-        /** Serves one frame without waiting for the engine to finish it (capture may stop inside that frame). */
-        fun offer() = frames.release()
+        /** Serves [frame] without waiting for the engine to finish it (capture may stop inside that frame). */
+        fun offer(frame: ByteArray = ByteArray(FRAME)) {
+            queued.add(frame)
+            frames.release()
+        }
 
         @Volatile var opens = 0
 
@@ -65,6 +75,7 @@ class WakeMicEngineTest {
                 !frames.tryAcquire(5, TimeUnit.MILLISECONDS) -> 0
 
                 else -> {
+                    queued.remove().copyInto(buf, offset, FRAME - length)
                     frameOut = true
                     length
                 }
@@ -78,9 +89,9 @@ class WakeMicEngineTest {
 
     /**
      * Counts frames it is fed, records each wake-word hot swap it receives and, when [wakeOnNextAccept] is set, returns
-     * that wake id from [accept].
+     * that wake id from [accept]. Only for the tests of several detectors at once.
      */
-    private class FakeDetector(val host: WakeDetector.Host) : WakeDetector {
+    private class FakeDetector : WakeDetector {
         override val id = "fake"
         val accepts = CopyOnWriteArrayList<Long>()
         val wakeWordUpdates = CopyOnWriteArrayList<List<WakeWord>>()
@@ -111,6 +122,8 @@ class WakeMicEngineTest {
 
     @Volatile private var nowMs = 0L
     private val device = SteppedDevice()
+    private val loader = FakeVoskLoader()
+    private val model = FakeVoskModel()
     private val wakes = CopyOnWriteArrayList<WakeEvent>()
     private val wakeThreads = CopyOnWriteArrayList<String>()
     private val logs = CopyOnWriteArrayList<String>()
@@ -124,47 +137,66 @@ class WakeMicEngineTest {
     private val opensAtAcquire = CopyOnWriteArrayList<Int>()
 
     @Volatile private var beforeMicAcquire: () -> Unit = { opensAtAcquire.add(-1) }
-    private val detectors = CopyOnWriteArrayList<FakeDetector>()
+    private val fakeDetectors = CopyOnWriteArrayList<FakeDetector>()
     private lateinit var engine: WakeMicEngine
 
-    private fun newEngine(
-        detectorCount: Int = 1,
-        newDevice: () -> PcmDevice = { device },
-        onCreate: (WakeDetector.Host) -> Unit = {},
-    ) = WakeMicEngine(
-        ContextWrapper(null),
-        WakeMicConfig(
-            wakeWords = emptyList(),
-            detectors = List(detectorCount) {
-                WakeDetector.Factory { host ->
-                    onCreate(host)
-                    FakeDetector(host).also {
-                        it.clock = { nowMs }
-                        detectors.add(it)
-                    }
-                }
-            },
-            wakeHandoffCooldownMs = 1_500L,
-            onWake = {
-                wakes.add(it)
-                wakeThreads.add(Thread.currentThread().name)
-            },
-            onDetectorReady = { ready.add(it) },
-            onDetectorUnavailable = { unavailable.add(it) },
-            onCaptureLost = { losses.add(it) },
-            beforeMicAcquire = { beforeMicAcquire() },
-            log = {
-                beforeLog(it)
-                logs.add(it)
-            },
-        ),
-        newDevice = newDevice,
-        postToMain = { posted.add(it) },
-        clock = { nowMs },
-    ).also { engine = it }
+    /** An engine on the Vosk wake detector, loading through [loader]. */
+    private fun newEngine(loader: VoskModelLoader = this.loader, newDevice: () -> PcmDevice = { device }) =
+        newEngine(listOf(VoskWakeDetector.factory(newLoader = { loader })), newDevice)
 
-    private val detector get() = detectors.single()
-    private val events get() = detector.host.events
+    /** An engine on [count] [FakeDetector]s, for the tests of several detectors at once. */
+    private fun newEngineWithFakeDetectors(count: Int) = newEngine(
+        List(count) {
+            WakeDetector.Factory {
+                FakeDetector().also { detector ->
+                    detector.clock = { nowMs }
+                    fakeDetectors.add(detector)
+                }
+            }
+        },
+    )
+
+    private fun newEngine(detectors: List<WakeDetector.Factory>, newDevice: () -> PcmDevice = { device }) =
+        WakeMicEngine(
+            ContextWrapper(null),
+            WakeMicConfig(
+                wakeWords = listOf(JARVIS),
+                detectors = detectors,
+                wakeHandoffCooldownMs = 1_500L,
+                onWake = {
+                    wakes.add(it)
+                    wakeThreads.add(Thread.currentThread().name)
+                },
+                onDetectorReady = { ready.add(it) },
+                onDetectorUnavailable = { unavailable.add(it) },
+                onCaptureLost = { losses.add(it) },
+                beforeMicAcquire = { beforeMicAcquire() },
+                log = {
+                    beforeLog(it)
+                    logs.add(it)
+                },
+            ),
+            newDevice = newDevice,
+            postToMain = { posted.add(it) },
+            clock = { nowMs },
+        ).also { engine = it }
+
+    /** A started engine whose detector has adopted the model and decoded frame [TAG_PRIME], with readiness run. */
+    private fun readyEngine() {
+        newEngine().start()
+        loader.complete(model)
+        device.push(frame(TAG_PRIME))
+        runPosted()
+    }
+
+    /** Pushes an endpoint frame tagged [tag] that decodes a confident "hey jarvis", if the detector hears it. */
+    private fun pushWake(tag: Int) {
+        model.finals.add(HEY_JARVIS_CONFIDENT)
+        device.push(frame(tag, endpoint = true))
+    }
+
+    /** The tags of the frames the live decoder has been fed, in order. */
+    private fun heard() = model.live.fedTags()
 
     private fun runPosted() {
         while (posted.isNotEmpty()) posted.removeAt(0).run()
@@ -197,22 +229,21 @@ class WakeMicEngineTest {
     }
 
     @Test fun noFrameReachesTheDetectorUntilTheHandoffCooldownElapses() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
+        readyEngine()
+        pushWake(2)
         nowMs = 500L
-        device.push()
+        device.push(frame(3))
         nowMs = 1_499L
-        device.push()
+        device.push(frame(4))
         nowMs = 1_500L
-        device.push()
+        device.push(frame(5))
 
-        assertEquals(listOf(0L, 1_500L), detector.accepts)
+        assertEquals(listOf(TAG_PRIME, 2, 5), heard())
     }
 
     @Test fun aWakeFromOneDetectorKeepsThatSameFrameFromEveryOtherDetector() {
-        newEngine(detectorCount = 2).start()
-        val (first, second) = detectors
+        newEngineWithFakeDetectors(count = 2).start()
+        val (first, second) = fakeDetectors
         first.wakeOnNextAccept = "jarvis"
         device.push()
         nowMs = 500L
@@ -223,104 +254,148 @@ class WakeMicEngineTest {
     }
 
     @Test fun aWakeExactlyWhenTheCooldownElapsesIsDeliveredAndOpensAFreshWindow() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
+        readyEngine()
+        pushWake(2)
         nowMs = 1_500L
-        detector.wakeOnNextAccept = "alexa"
-        device.push()
+        pushWake(3)
         nowMs = 2_999L
-        device.push()
+        device.push(frame(4))
         nowMs = 3_000L
-        device.push()
+        device.push(frame(5))
 
-        assertEquals(listOf("jarvis", "alexa"), wakes.map { it.wakeId })
-        assertEquals(listOf(0L, 1_500L, 3_000L), detector.accepts)
+        assertEquals(listOf("jarvis", "jarvis"), wakes.map { it.wakeId })
+        assertEquals(listOf(TAG_PRIME, 2, 3, 5), heard())
     }
 
     @Test fun restartingCaptureClosesTheCooldown() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
+        readyEngine()
+        pushWake(2)
         nowMs = 500L
         engine.pause()
         engine.start()
-        detector.wakeOnNextAccept = "alexa"
-        device.push()
+        pushWake(3)
 
-        assertEquals(listOf(0L, 500L), detector.accepts)
-        assertEquals(listOf("jarvis", "alexa"), wakes.map { it.wakeId })
+        assertEquals(listOf(TAG_PRIME, 2, 3), heard())
+        assertEquals(listOf("jarvis", "jarvis"), wakes.map { it.wakeId })
     }
 
     @Test fun onWakeIsDeliveredOnTheCaptureThreadAndLogged() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
+        readyEngine()
+        pushWake(2)
 
+        assertEquals(listOf(WakeEvent("vosk", "jarvis", "hey(97) jarvis(81)")), wakes)
         assertEquals(listOf("wake-capture"), wakeThreads)
-        assertTrue(logs.contains("wake detected (fake) → jarvis [transcript]"))
+        assertTrue(logs.contains("wake detected (vosk) → jarvis [hey(97) jarvis(81)]"))
     }
 
-    @Test fun onReadyIsDeliveredThroughTheMainThreadPoster() {
-        newEngine()
-        events.onReady("fake")
+    @Test fun onReadyIsDeliveredThroughTheMainThreadPosterAtTheFirstFrameAfterTheModelLoads() {
+        newEngine().start()
+        loader.complete(model)
+        device.push(frame(2))
         assertEquals(emptyList<String>(), ready)
         runPosted()
 
-        assertEquals(listOf("fake"), ready)
-        assertEquals(listOf("wake detector ready (fake)"), logs)
+        assertEquals(listOf("vosk"), ready)
+        assertTrue(logs.contains("wake detector ready (vosk)"))
     }
 
     @Test fun onUnavailableIsDeliveredThroughTheMainThreadPoster() {
         newEngine()
-        events.onUnavailable("fake")
+        loader.fail()
         assertEquals(emptyList<String>(), unavailable)
         runPosted()
 
-        assertEquals(listOf("fake"), unavailable)
-        assertEquals(listOf("wake unavailable (fake) — detector idle"), logs)
+        assertEquals(listOf("vosk"), unavailable)
+        assertEquals(listOf("wake unavailable (vosk) — detector idle"), logs)
+    }
+
+    @Test fun aFirstDecoderThatCannotBeBuiltIsUnavailable() {
+        model.failBuilds = true
+        newEngine().start()
+        loader.complete(model)
+        device.push(frame(2))
+        runPosted()
+
+        assertEquals(listOf("vosk"), unavailable)
+        assertEquals(emptyList<String>(), ready)
     }
 
     @Test fun aModelThatFailsWhileTheEngineIsBeingConstructedIsPostedNotDeliveredInline() {
-        newEngine(onCreate = { it.events.onUnavailable("fake") })
+        newEngine(loader = FakeVoskLoader(throwOnLoad = true))
         assertEquals(emptyList<String>(), unavailable)
         runPosted()
 
-        assertEquals(listOf("fake"), unavailable)
+        assertEquals(listOf("vosk"), unavailable)
     }
 
-    @Test fun aDetectorReadyWhileTheEngineIsBeingConstructedIsPostedNotDeliveredInline() {
-        newEngine(onCreate = { it.events.onReady("fake") })
-        assertEquals(emptyList<String>(), ready)
-        runPosted()
+    @Test fun framesCapturedWhileTheModelLoadsAreReplayedOnceItIsReady() {
+        newEngine().start()
+        device.push(frame(2))
+        device.push(frame(3))
+        loader.complete(model)
+        device.push(frame(4))
 
-        assertEquals(listOf("fake"), ready)
+        assertEquals(listOf(2, 3, 4), heard())
+        assertTrue(logs.contains("(vosk) flushing 2 pre-ready frame(s)"))
     }
 
-    @Test fun aWakeWordHotSwapReachesEveryDetectorBeforeItsNextFrame() {
-        newEngine(detectorCount = 2).start()
+    @Test fun aWakeInTheReplayedFramesIsDelivered() {
+        newEngine().start()
+        model.finals.add(HEY_JARVIS_CONFIDENT)
+        device.push(frame(2, endpoint = true))
+        loader.complete(model)
+        device.push(frame(3))
+        device.push(frame(4)) // inside the handoff cooldown the wake opened
+
+        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
+        assertEquals(listOf(2), heard())
+    }
+
+    @Test fun aWakeWordHotSwapReachesTheDetectorBeforeItsNextFrame() {
+        readyEngine()
         engine.updateWakeWords(listOf(ALEXA))
-        device.push()
+        device.push(frame(2))
 
-        detectors.forEach { assertEquals(listOf(listOf(ALEXA)), it.wakeWordUpdates) }
+        assertEquals(ALEXA_GRAMMAR, model.live.grammar)
+        assertEquals(listOf(2), heard())
         assertTrue(logs.contains("wake set changed → rebuilding grammar (1 word(s))"))
     }
 
-    @Test fun diagnosticsAreLoggedWithTheDetectorId() {
-        newEngine()
-        events.onDiagnostic("fake", "near-miss [hey(72) jarvis(95)] rejected: floor")
+    @Test fun aWakeWordHotSwapBeforeTheModelLoadsIsTheFirstGrammar() {
+        newEngine().start()
+        engine.updateWakeWords(listOf(ALEXA))
+        device.push(frame(2))
+        loader.complete(model)
+        device.push(frame(3))
 
-        assertEquals(listOf("(fake) near-miss [hey(72) jarvis(95)] rejected: floor"), logs)
+        assertEquals(ALEXA_GRAMMAR, model.decoders.single().grammar)
     }
 
-    @Test fun callbacksAlreadyQueuedAreNotDeliveredAfterClose() {
-        newEngine()
-        events.onReady("fake")
-        events.onUnavailable("fake")
+    @Test fun aWakeWordHotSwapReachesEveryDetectorBeforeItsNextFrame() {
+        newEngineWithFakeDetectors(count = 2).start()
+        engine.updateWakeWords(listOf(ALEXA))
+        device.push()
+
+        fakeDetectors.forEach { assertEquals(listOf(listOf(ALEXA)), it.wakeWordUpdates) }
+        assertTrue(logs.contains("wake set changed → rebuilding grammar (1 word(s))"))
+    }
+
+    @Test fun aReadinessAlreadyQueuedIsNotDeliveredAfterClose() {
+        newEngine().start()
+        loader.complete(model)
+        device.push(frame(2))
         engine.close()
         runPosted()
 
         assertEquals(emptyList<String>(), ready)
+    }
+
+    @Test fun anUnavailabilityAlreadyQueuedIsNotDeliveredAfterClose() {
+        newEngine()
+        loader.fail()
+        engine.close()
+        runPosted()
+
         assertEquals(emptyList<String>(), unavailable)
     }
 
@@ -342,11 +417,21 @@ class WakeMicEngineTest {
         assertEquals(0, device.opens)
     }
 
-    @Test fun closingTwiceClosesEveryDetectorOnce() {
-        newEngine(detectorCount = 2).close()
+    @Test fun closingTwiceFreesTheDecoderAndTheModelOnce() {
+        readyEngine()
+        engine.close()
         engine.close()
 
-        assertEquals(listOf(1, 1), detectors.map { it.closes })
+        assertTrue(model.live.closed)
+        assertEquals(1, model.live.log.count { it == "close" })
+        assertEquals(1, model.closeCount)
+    }
+
+    @Test fun closingTwiceClosesEveryDetectorOnce() {
+        newEngineWithFakeDetectors(count = 2).close()
+        engine.close()
+
+        assertEquals(listOf(1, 1), fakeDetectors.map { it.closes })
     }
 
     @Test fun aLossReachesOnCaptureLost() {
@@ -360,7 +445,7 @@ class WakeMicEngineTest {
 
     @Test fun theEngineRebuildsAfterRepeatedReadFailures() {
         newEngine().start()
-        device.push()
+        device.push(frame(2))
         device.failOpens = 1
         device.failReads = true // the read-failure run ends in a rebuild whose open fails
         awaitCaptureEndThenRunPosted()
@@ -370,7 +455,7 @@ class WakeMicEngineTest {
 
     @Test fun theEngineCapturesUnderATwoSecondSilenceWindow() {
         newEngine().start()
-        repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
+        repeat(19) { device.push() } // all-zero frames: 1.9 s of digital silence
         device.offer() // the 20th fills the 2 s window, and capture ends inside it
         awaitCaptureEndThenRunPosted()
 
@@ -386,14 +471,18 @@ class WakeMicEngineTest {
                 holdWake.await()
             }
         }
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.offer()
+        readyEngine()
+        model.finals.add(HEY_JARVIS_CONFIDENT)
+        device.offer(frame(2, endpoint = true))
         assertTrue(wakeLogged.await(2, TimeUnit.SECONDS))
         engine.close() // the capture thread is held inside the frame, so close() gives up waiting for it
         holdWake.countDown()
-        await("the detector closes once the frame ends") { detector.closes == 1 }
+        await("the detector frees the model once the frame ends") { model.closeCount == 1 }
 
         assertEquals(emptyList<WakeEvent>(), wakes)
+    }
+
+    private companion object {
+        const val TAG_PRIME = 99
     }
 }
