@@ -8,9 +8,10 @@ import kotlin.concurrent.thread
 
 /**
  * Races between the model load (its own thread) and the capture / controlling threads (spec decision 8). The
- * test thread plays the capture thread; [Gate] holds the load thread inside its first decoder build, if it
- * makes one, to open the window. Each test asserts only the end state — which decoder is live, and that
- * everything else was freed exactly once — so it holds however the detector hands the model over.
+ * test thread plays the capture thread; [Gate] holds the first decoder build to open the window. The build happens
+ * on the capture thread, at the first frame after delivery, so the load thread normally only hands the model over and
+ * the gate opens no window. Each test asserts only the end state — which decoder is live, and that everything else was
+ * freed exactly once — so it holds however the detector hands the model over.
  */
 class VoskWakeDetectorRaceTest {
 

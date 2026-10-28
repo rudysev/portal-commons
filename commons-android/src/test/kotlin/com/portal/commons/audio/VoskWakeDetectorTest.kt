@@ -4,16 +4,15 @@ import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.audio.ScriptedDecoder.Companion.frame
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * The Vosk detector, tested through the [WakeDetector] interface only. Native libvosk is replaced at the seam
- * ([VoskModelLoader] / [VoskModel] / [VoskDecoder]) by fakes, so grammar building, warm-up, JSON parsing, the
- * matcher, idle reset, the pre-ready buffer + replay and the grammar hot-swap all run for real. Real `org.json`
- * on the JVM (see `testOptions` in build.gradle.kts).
+ * ([VoskModelLoader] / [VoskModel] / [VoskDecoder]) by fakes, so model handoff, readiness, the pre-ready buffer +
+ * replay and the [WakeDecoder] underneath all run for real. Decoding itself is covered by [WakeDecoderTest]. Real
+ * `org.json` on the JVM (see `testOptions` in build.gradle.kts).
  *
  * Readiness is asserted only after a frame has been fed, so these tests hold whether the detector signals on
  * the model-load thread or at the next frame boundary.
@@ -49,51 +48,11 @@ class VoskWakeDetectorTest {
         return accept(frame(3, endpoint = true), FRAME)
     }
 
-    // ---- final-result decoding → wake / near-miss / flushed -----------------------------------------
+    // ---- one wake end to end ------------------------------------------------------------------------
 
     @Test fun confidentWakeIsReturnedWithItsDecode() {
         assertEquals(wake("jarvis", "hey(97) jarvis(81)"), readyDetector().decode(HEY_JARVIS_CONFIDENT))
         assertEquals(emptyList<String>(), events.lines)
-    }
-
-    @Test fun textOnlyDecodeHasNoConfidence_soOnlyALenientRouteFires() {
-        assertNull(readyDetector().decode("""{"text":"hey jarvis"}"""))
-        assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.8 floor"), events.lines)
-    }
-
-    @Test fun textOnlyDecodeFiresALenientRoute() {
-        val returned = readyDetector(listOf(JARVIS_LENIENT)).decode("""{"text":"hey jarvis"}""")
-        assertEquals(wake("jarvis", "hey jarvis"), returned)
-    }
-
-    @Test fun lowConfidenceCleanPhraseFiresALenientRoute() {
-        val returned = readyDetector(listOf(JARVIS_LENIENT))
-            .decode("""{"result":[{"conf":0.9,"word":"hey"},{"conf":0.2,"word":"jarvis"}],"text":"hey jarvis"}""")
-        assertEquals(wake("jarvis", "hey(90) jarvis(20)"), returned)
-    }
-
-    @Test fun emptyOrMalformedDecodesReportNothing() {
-        val d = readyDetector()
-        assertNull(d.decode("""{"text":""}"""))
-        assertNull(d.decode("""{}"""))
-        assertNull(d.decode("not json"))
-        assertEquals(emptyList<String>(), events.lines)
-    }
-
-    @Test fun nearMissReportsTheDecodeAndTheGate() {
-        val returned = readyDetector().decode(
-            """{"result":[{"conf":0.51,"word":"[unk]"},{"conf":0.99,"word":"hey"},{"conf":0.99,"word":"jarvis"}]}""",
-        )
-        assertNull(returned)
-        assertEquals(
-            listOf("near-miss [[unk](51) hey(99) jarvis(99)] rejected: contaminated ('[unk]' in decode)"),
-            events.lines,
-        )
-    }
-
-    @Test fun keywordFreeDecodeIsReportedAsAFlushedFinal() {
-        readyDetector().decode("""{"result":[{"conf":0.99,"word":"hey"}],"text":"hey"}""")
-        assertEquals(listOf("flushed final [hey(99)]"), events.lines)
     }
 
     // ---- model load + first decoder build → readiness -----------------------------------------------
@@ -124,28 +83,7 @@ class VoskWakeDetectorTest {
         d.accept(frame(2), FRAME)
         assertEquals(listOf("unavailable"), events.lines)
         assertTrue(model.decoders.isEmpty())
-    }
-
-    @Test fun grammarListsEachPhraseKeywordAndLeadThenUnk() {
-        val d = detector(listOf(JARVIS, ALEXA, COMPUTER))
-        loader.complete(model)
-        d.accept(frame(2), FRAME)
-        assertEquals(
-            """["hey jarvis", "jarvis", "hey", "hey alexa", "alexa", "computer", "[unk]"]""",
-            model.live.grammar,
-        )
-    }
-
-    @Test fun rejectedGrammarFallsBackToOpenVocabulary() {
-        model.rejectGrammar = true
-        val d = detector()
-        loader.complete(model)
-        d.accept(frame(2), FRAME)
-        assertEquals(listOf("ready"), events.lines)
-        assertNull(model.decoders.single().grammar)
-
-        // the matcher still runs over the open-vocabulary decode
-        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT))
+        assertEquals(1, model.closeCount)
     }
 
     @Test fun wakeWordsSwappedBeforeTheModelLoadsAreTheFirstGrammar() {
@@ -156,9 +94,9 @@ class VoskWakeDetectorTest {
         assertEquals(ALEXA_GRAMMAR, model.decoders.single().grammar)
     }
 
-    // ---- warm-up ------------------------------------------------------------------------------------
+    // ---- start ---------------------------------------------------------------------------------------
 
-    @Test fun everyBuildAndEveryResetIsWarmedWithTenSilentFrames() {
+    @Test fun startResetsAndRewarmsTheDecoder() {
         val d = detector()
         loader.complete(model)
         d.accept(frame(2), FRAME)
@@ -387,42 +325,6 @@ class VoskWakeDetectorTest {
         assertEquals(1, model.live.partialQueries)
     }
 
-    // ---- grammar hot-swap ---------------------------------------------------------------------------
-
-    @Test fun grammarSwapBuildsAWarmedDecoderAndClosesTheOld() {
-        val d = readyDetector()
-        val old = model.live
-        d.updateWakeWords(listOf(ALEXA))
-
-        assertTrue(old.closed)
-        assertEquals(ALEXA_GRAMMAR, model.live.grammar)
-        assertEquals(warmUp(), model.live.log)
-        assertEquals(wake("alexa", "hey(99) alexa(99)"), d.decode(HEY_ALEXA))
-    }
-
-    @Test fun failedGrammarSwapKeepsTheOldDecoderAndTheOldWakeWords() {
-        val d = readyDetector()
-        val old = model.live
-        model.failBuilds = true
-        d.updateWakeWords(listOf(ALEXA))
-
-        assertFalse(old.closed)
-        assertEquals(listOf(old), model.decoders.toList())
-        assertNull(d.decode(HEY_ALEXA)) // the matcher still runs the old set, in step with the live grammar
-        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT))
-        assertEquals(listOf("flushed final [hey(99) alexa(99)]"), events.lines)
-        assertEquals(listOf(TAG_PRIME, 3, 3), old.fedTags())
-    }
-
-    @Test fun grammarSwapRejectedByTheModelFallsBackToOpenVocabulary() {
-        val d = readyDetector()
-        model.rejectGrammar = true
-        d.updateWakeWords(listOf(ALEXA))
-
-        assertNull(model.live.grammar)
-        assertEquals(wake("alexa", "hey(99) alexa(99)"), d.decode(HEY_ALEXA))
-    }
-
     // ---- close --------------------------------------------------------------------------------------
 
     @Test fun closeFreesTheDecoderAndTheModel() {
@@ -433,7 +335,7 @@ class VoskWakeDetectorTest {
 
     private fun wake(wakeId: String, transcript: String) = WakeEvent(VoskWakeDetector.ID, wakeId, transcript)
 
-    private fun warmUp() = List(VoskWakeDetector.WARMUP_SILENCE_FRAMES) { "silence" }
+    private fun warmUp() = List(WakeDecoder.WARMUP_SILENCE_FRAMES) { "silence" }
 
     private companion object {
         const val TAG_PRIME = 99
@@ -441,19 +343,5 @@ class VoskWakeDetectorTest {
         const val FORCE = 60_000L
         const val IDLE_RESET = "idle reset (bounding Vosk lattice)"
         const val FORCED_RESET = "idle reset forced mid-decode (bounding Vosk lattice)"
-
-        val JARVIS_LENIENT = WakeWord.fromPhrase("hey jarvis", id = "jarvis", minConf = WakeMatcher.BASELINE_CONF)!!
-        val COMPUTER = WakeWord.fromPhrase("computer", minConf = WakeMatcher.BASELINE_CONF)!!
-
-        const val ALEXA_GRAMMAR = """["hey alexa", "alexa", "hey", "[unk]"]"""
-
-        val HEY_JARVIS_CONFIDENT = """
-            {"result":[
-              {"conf":0.97,"word":"hey"},
-              {"conf":0.81,"word":"jarvis"}
-            ],"text":"hey jarvis"}
-        """.trimIndent()
-
-        const val HEY_ALEXA = """{"result":[{"conf":0.99,"word":"hey"},{"conf":0.99,"word":"alexa"}]}"""
     }
 }

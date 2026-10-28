@@ -12,6 +12,16 @@ internal const val FRAME = PcmCaptureFormat.FRAME_BYTES
 internal val JARVIS = WakeWord.fromPhrase("hey jarvis", id = "jarvis", minConf = WakeMatcher.STRICT_MIN_CONF)!!
 internal val ALEXA = WakeWord.fromPhrase("hey alexa", id = "alexa", minConf = WakeMatcher.STRICT_MIN_CONF)!!
 
+internal const val ALEXA_GRAMMAR = """["hey alexa", "alexa", "hey", "[unk]"]"""
+
+/** A final result that wakes [JARVIS]: "hey jarvis" with per-word confidence. */
+internal val HEY_JARVIS_CONFIDENT = """
+    {"result":[
+      {"conf":0.97,"word":"hey"},
+      {"conf":0.81,"word":"jarvis"}
+    ],"text":"hey jarvis"}
+""".trimIndent()
+
 /** A [VoskModelLoader] the test completes, fails, or throws from on demand. */
 internal class FakeVoskLoader(private val throwOnLoad: Boolean = false) : VoskModelLoader {
     private var onLoaded: ((VoskModel) -> Unit)? = null
