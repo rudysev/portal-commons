@@ -77,8 +77,8 @@ class WakeMicEngineTest {
     }
 
     /**
-     * Counts frames it is fed, records each wake-word hot swap it receives and, when [wakeOnNextAccept] is set, fires
-     * that wake id from inside [accept].
+     * Counts frames it is fed, records each wake-word hot swap it receives and, when [wakeOnNextAccept] is set, returns
+     * that wake id from [accept].
      */
     private class FakeDetector(val host: WakeDetector.Host) : WakeDetector {
         override val id = "fake"
@@ -91,11 +91,11 @@ class WakeMicEngineTest {
 
         override fun start() = Unit
 
-        override fun accept(buf: ByteArray, n: Int) {
+        override fun accept(buf: ByteArray, n: Int): WakeEvent? {
             accepts.add(clock())
-            val wakeId = wakeOnNextAccept ?: return
+            val wakeId = wakeOnNextAccept ?: return null
             wakeOnNextAccept = null
-            host.events.onWake(WakeEvent(id, wakeId, "transcript"))
+            return WakeEvent(id, wakeId, "transcript")
         }
 
         override fun updateWakeWords(words: List<WakeWord>) {
@@ -222,28 +222,6 @@ class WakeMicEngineTest {
         assertEquals(emptyList<Long>(), second.accepts)
     }
 
-    @Test fun aRepeatOfTheSameWakeIdInsideTheCooldownNeverReachesTheConsumerAndIsLogged() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
-        nowMs = 500L
-        events.onWake(WakeEvent("fake", "jarvis", "again"))
-
-        assertEquals(listOf(WakeEvent("fake", "jarvis", "transcript")), wakes)
-        assertTrue(logs.contains("wake dropped (handoff cooldown) → jarvis [again]"))
-    }
-
-    @Test fun aDifferentWakeIdInsideTheCooldownIsDroppedTooAndLogged() {
-        newEngine().start()
-        detector.wakeOnNextAccept = "jarvis"
-        device.push()
-        nowMs = 500L
-        events.onWake(WakeEvent("fake", "alexa", "direct"))
-
-        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
-        assertTrue(logs.contains("wake dropped (handoff cooldown) → alexa [direct]"))
-    }
-
     @Test fun aWakeExactlyWhenTheCooldownElapsesIsDeliveredAndOpensAFreshWindow() {
         newEngine().start()
         detector.wakeOnNextAccept = "jarvis"
@@ -253,7 +231,6 @@ class WakeMicEngineTest {
         device.push()
         nowMs = 2_999L
         device.push()
-        events.onWake(WakeEvent("fake", "jarvis", "inside the fresh window"))
         nowMs = 3_000L
         device.push()
 
@@ -268,11 +245,11 @@ class WakeMicEngineTest {
         nowMs = 500L
         engine.pause()
         engine.start()
+        detector.wakeOnNextAccept = "alexa"
         device.push()
-        events.onWake(WakeEvent("fake", "alexa", "after restart"))
 
         assertEquals(listOf(0L, 500L), detector.accepts)
-        assertEquals(listOf("transcript", "after restart"), wakes.map { it.transcript })
+        assertEquals(listOf("jarvis", "alexa"), wakes.map { it.wakeId })
     }
 
     @Test fun onWakeIsDeliveredOnTheCaptureThreadAndLogged() {
@@ -398,13 +375,6 @@ class WakeMicEngineTest {
         awaitCaptureEndThenRunPosted()
 
         assertEquals(listOf(CaptureLoss.Silenced("digital silence for 2000ms")), losses)
-    }
-
-    @Test fun aWakeRaisedAfterCloseNeverReachesTheConsumer() {
-        newEngine().close()
-        events.onWake(WakeEvent("fake", "jarvis", "after close"))
-
-        assertEquals(emptyList<WakeEvent>(), wakes)
     }
 
     @Test fun aWakeHeldUpPastACloseThatGaveUpWaitingNeverReachesTheConsumer() {

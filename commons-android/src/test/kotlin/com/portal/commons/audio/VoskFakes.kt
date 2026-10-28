@@ -149,10 +149,7 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
     }
 }
 
-/**
- * Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, `wake:<id> [<transcript>]`, or the
- * diagnostic.
- */
+/** Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, or the diagnostic. */
 internal class RecordingEvents : WakeDetector.Events {
     val lines = CopyOnWriteArrayList<String>()
 
@@ -162,10 +159,6 @@ internal class RecordingEvents : WakeDetector.Events {
 
     override fun onUnavailable(detectorId: String) {
         lines.add("unavailable")
-    }
-
-    override fun onWake(event: WakeEvent) {
-        lines.add("wake:${event.wakeId} [${event.transcript}]")
     }
 
     override fun onDiagnostic(detectorId: String, message: String) {

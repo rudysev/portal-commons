@@ -19,9 +19,8 @@ import android.content.Context
  * the bounded close, or a close from inside the wake callback), by the capture thread as it leaves that call.
  * The engine never runs two of these calls at once, even when it rebuilds a wedged capture session while the
  * old capture thread is still inside a detector call (two threads in one Vosk recognizer abort the process).
- * A detector raises [Events.onWake] only from inside [accept], on the capture thread: never from [start],
- * [updateWakeWords], [close] or a thread of its own. The engine's wake delivery guarantees (no wake from an
- * overtaken capture request, none after [WakeMicEngine.close] returns) depend on it.
+ * A wake exists only as the return value of [accept], so it arises on the capture thread inside a frame the engine
+ * fed: never from [start], [updateWakeWords], [close] or a thread of its own.
  * Readiness is asynchronous and may be frame-driven: the Vosk detector signals [Events.onReady] (and
  * [Events.onUnavailable] for a failed first decoder build) on the capture thread at the first frame after its
  * model loads — so not while capture is paused — and [Events.onUnavailable] for a failed model load straight
@@ -41,15 +40,13 @@ interface WakeDetector {
     fun start()
 
     /**
-     * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]). Report a match via [Host.events], from
-     * inside this call: it is the only place a detector may raise [Events.onWake]. Called on the capture thread.
-     * An implementation that isn't ready yet should buffer or drop internally — the engine delivers every frame
-     * except those inside the handoff cooldown (the single window after any wake), which no detector hears (even
-     * one still loading). The cooldown is the engine's alone and is not visible here: a detector that replays
-     * buffered frames in one call must stop at its own first wake, since everything after it falls inside the
-     * cooldown.
+     * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]) and return the wake it completed, or null for
+     * none. Called on the capture thread. At most one wake per call: a detector that decodes several buffered frames
+     * in one call stops at its first wake and decodes nothing after it within that call. An implementation that isn't
+     * ready yet should buffer or drop internally; the engine may skip frames, so a detector must not assume it hears
+     * every one.
      */
-    fun accept(buf: ByteArray, n: Int)
+    fun accept(buf: ByteArray, n: Int): WakeEvent?
 
     /**
      * Hot-swap the active wake set without tearing down capture. Called on the capture thread at a frame
@@ -71,10 +68,10 @@ interface WakeDetector {
     }
 
     /**
-     * How a detector reports back to [WakeMicEngine]. Callbacks carry the detector [WakeEvent.detectorId]; the
-     * engine prefixes log lines with it. [onWake] is invoked on the **capture thread**; [onReady] and
-     * [onUnavailable] on the capture thread or a detector's own model-load thread — [WakeMicEngine]
-     * re-delivers those two to the consumer on the main thread (see [WakeMicConfig]).
+     * How a detector reports back to [WakeMicEngine], besides the wakes [accept] returns. Callbacks carry the detector
+     * id; the engine prefixes log lines with it. [onReady] and [onUnavailable] are invoked on the capture thread or a
+     * detector's own model-load thread — [WakeMicEngine] re-delivers those two to the consumer on the main thread
+     * (see [WakeMicConfig]).
      */
     interface Events {
         /**
@@ -89,13 +86,6 @@ interface WakeDetector {
          * build fails.
          */
         fun onUnavailable(detectorId: String)
-
-        /**
-         * A genuine wake fired: hand off to [WakeEvent.wakeId]. [WakeEvent.transcript] is a human-readable
-         * decode for the log. Called on the **capture thread**, and only from inside [WakeDetector.accept]: the
-         * engine's wake delivery guarantees depend on it.
-         */
-        fun onWake(event: WakeEvent)
 
         /**
          * A tuning-relevant non-fire. The engine logs it prefixed with the detector [detectorId] so parallel

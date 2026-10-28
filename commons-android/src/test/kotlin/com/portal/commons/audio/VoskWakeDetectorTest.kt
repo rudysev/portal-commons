@@ -43,47 +43,48 @@ class VoskWakeDetectorTest {
         accept(frame(tag), FRAME)
     }
 
-    /** Feed one finalizing frame that decodes [json]. */
-    private fun WakeDetector.decode(json: String) {
+    /** Feed one finalizing frame that decodes [json]; returns the wake [WakeDetector.accept] returned, if any. */
+    private fun WakeDetector.decode(json: String): WakeEvent? {
         model.finals.add(json)
-        accept(frame(3, endpoint = true), FRAME)
+        return accept(frame(3, endpoint = true), FRAME)
     }
 
     // ---- final-result decoding → wake / near-miss / flushed -----------------------------------------
 
-    @Test fun confidentWakeFiresWithItsDecode() {
-        readyDetector().decode(HEY_JARVIS_CONFIDENT)
-        assertEquals(listOf("wake:jarvis [hey(97) jarvis(81)]"), events.lines)
+    @Test fun confidentWakeIsReturnedWithItsDecode() {
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), readyDetector().decode(HEY_JARVIS_CONFIDENT))
+        assertEquals(emptyList<String>(), events.lines)
     }
 
     @Test fun textOnlyDecodeHasNoConfidence_soOnlyALenientRouteFires() {
-        readyDetector().decode("""{"text":"hey jarvis"}""")
+        assertNull(readyDetector().decode("""{"text":"hey jarvis"}"""))
         assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.8 floor"), events.lines)
     }
 
     @Test fun textOnlyDecodeFiresALenientRoute() {
-        readyDetector(listOf(JARVIS_LENIENT)).decode("""{"text":"hey jarvis"}""")
-        assertEquals(listOf("wake:jarvis [hey jarvis]"), events.lines)
+        val returned = readyDetector(listOf(JARVIS_LENIENT)).decode("""{"text":"hey jarvis"}""")
+        assertEquals(wake("jarvis", "hey jarvis"), returned)
     }
 
     @Test fun lowConfidenceCleanPhraseFiresALenientRoute() {
-        readyDetector(listOf(JARVIS_LENIENT))
+        val returned = readyDetector(listOf(JARVIS_LENIENT))
             .decode("""{"result":[{"conf":0.9,"word":"hey"},{"conf":0.2,"word":"jarvis"}],"text":"hey jarvis"}""")
-        assertEquals(listOf("wake:jarvis [hey(90) jarvis(20)]"), events.lines)
+        assertEquals(wake("jarvis", "hey(90) jarvis(20)"), returned)
     }
 
     @Test fun emptyOrMalformedDecodesReportNothing() {
         val d = readyDetector()
-        d.decode("""{"text":""}""")
-        d.decode("""{}""")
-        d.decode("not json")
+        assertNull(d.decode("""{"text":""}"""))
+        assertNull(d.decode("""{}"""))
+        assertNull(d.decode("not json"))
         assertEquals(emptyList<String>(), events.lines)
     }
 
     @Test fun nearMissReportsTheDecodeAndTheGate() {
-        readyDetector().decode(
+        val returned = readyDetector().decode(
             """{"result":[{"conf":0.51,"word":"[unk]"},{"conf":0.99,"word":"hey"},{"conf":0.99,"word":"jarvis"}]}""",
         )
+        assertNull(returned)
         assertEquals(
             listOf("near-miss [[unk](51) hey(99) jarvis(99)] rejected: contaminated ('[unk]' in decode)"),
             events.lines,
@@ -143,8 +144,8 @@ class VoskWakeDetectorTest {
         assertEquals(listOf("ready"), events.lines)
         assertNull(model.decoders.single().grammar)
 
-        d.decode(HEY_JARVIS_CONFIDENT) // the matcher still runs over the open-vocabulary decode
-        assertEquals("wake:jarvis [hey(97) jarvis(81)]", events.lines.last())
+        // the matcher still runs over the open-vocabulary decode
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT))
     }
 
     @Test fun wakeWordsSwappedBeforeTheModelLoadsAreTheFirstGrammar() {
@@ -245,9 +246,8 @@ class VoskWakeDetectorTest {
         assertEquals(listOf("ready", "flushing 1 pre-ready frame(s)"), events.lines)
     }
 
-    @Test fun replayStopsAtTheFirstWake() {
-        // Everything after a replayed wake, including the frame that started the replay, falls inside the
-        // handoff cooldown, so none of it is decoded.
+    @Test fun replayStopsAtTheFirstWakeAndDropsTheRestOfTheBacklog() {
+        // Audio buffered before a wake, including the frame that started the replay, is never decoded after it.
         val d = detector()
         d.accept(frame(2, endpoint = true), FRAME)
         d.accept(frame(3, endpoint = true), FRAME)
@@ -255,14 +255,13 @@ class VoskWakeDetectorTest {
         model.finals.add(HEY_JARVIS_CONFIDENT)
         model.finals.add(HEY_JARVIS_CONFIDENT)
         loader.complete(model)
-        d.accept(frame(5), FRAME)
-        d.accept(frame(6), FRAME) // live again: past the replay, only the engine drops cooldown frames
+        val replayed = d.accept(frame(5), FRAME)
+        val live = d.accept(frame(6), FRAME) // past the replay, live frames decode again
 
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), replayed)
+        assertNull(live)
         assertEquals(listOf(2, 6), model.live.fedTags())
-        assertEquals(
-            listOf("ready", "flushing 3 pre-ready frame(s)", "wake:jarvis [hey(97) jarvis(81)]"),
-            events.lines,
-        )
+        assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), events.lines)
     }
 
     // ---- idle reset: the timer ----------------------------------------------------------------------
@@ -398,8 +397,7 @@ class VoskWakeDetectorTest {
         assertTrue(old.closed)
         assertEquals(ALEXA_GRAMMAR, model.live.grammar)
         assertEquals(warmUp(), model.live.log)
-        d.decode(HEY_ALEXA)
-        assertEquals(listOf("wake:alexa [hey(99) alexa(99)]"), events.lines)
+        assertEquals(wake("alexa", "hey(99) alexa(99)"), d.decode(HEY_ALEXA))
     }
 
     @Test fun failedGrammarSwapKeepsTheOldDecoderAndTheOldWakeWords() {
@@ -410,9 +408,9 @@ class VoskWakeDetectorTest {
 
         assertFalse(old.closed)
         assertEquals(listOf(old), model.decoders.toList())
-        d.decode(HEY_ALEXA) // the matcher still runs the old set, in step with the live grammar
-        d.decode(HEY_JARVIS_CONFIDENT)
-        assertEquals(listOf("flushed final [hey(99) alexa(99)]", "wake:jarvis [hey(97) jarvis(81)]"), events.lines)
+        assertNull(d.decode(HEY_ALEXA)) // the matcher still runs the old set, in step with the live grammar
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT))
+        assertEquals(listOf("flushed final [hey(99) alexa(99)]"), events.lines)
         assertEquals(listOf(TAG_PRIME, 3, 3), old.fedTags())
     }
 
@@ -422,8 +420,7 @@ class VoskWakeDetectorTest {
         d.updateWakeWords(listOf(ALEXA))
 
         assertNull(model.live.grammar)
-        d.decode(HEY_ALEXA)
-        assertEquals(listOf("wake:alexa [hey(99) alexa(99)]"), events.lines)
+        assertEquals(wake("alexa", "hey(99) alexa(99)"), d.decode(HEY_ALEXA))
     }
 
     // ---- close --------------------------------------------------------------------------------------
@@ -433,6 +430,8 @@ class VoskWakeDetectorTest {
         assertTrue(model.live.closed)
         assertEquals(1, model.closeCount)
     }
+
+    private fun wake(wakeId: String, transcript: String) = WakeEvent(VoskWakeDetector.ID, wakeId, transcript)
 
     private fun warmUp() = List(VoskWakeDetector.WARMUP_SILENCE_FRAMES) { "silence" }
 
