@@ -5,7 +5,6 @@ import com.portal.commons.CapturePolicy
 import com.portal.commons.PcmCapture
 import com.portal.commons.PcmDevice
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Captures the mic through one [PcmCapture] and feeds each captured frame to its one **wake detector** (see
@@ -41,8 +40,9 @@ import java.util.concurrent.atomic.AtomicReference
  * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
  *
  * The capture lifecycle (capture requests, serialized wake detector calls, the closed state, the bounded close) lives
- * in [PcmCapture], whose `onClosed` closes the wake detector; this class keeps the wake policy: the handoff cooldown,
- * the wake-word hot-swap and the routing of the wake detector's callbacks.
+ * in [PcmCapture], whose `onClosed` closes the wake detector; this class keeps the wake policy: the handoff cooldown
+ * and the routing of the wake detector's callbacks. The current wake words live in the wake detector, which takes a
+ * hot swap from any thread; [updateWakeWords] only forwards it.
  *
  * **The wake detector's calls** follow the threading contract on [WakeDetector]. Its readiness and unavailability
  * reach the consumer on the main thread.
@@ -69,10 +69,6 @@ class WakeMicEngine internal constructor(
 
     private fun inHandoffCooldown(): Boolean = clock() < handoffCooldownUntilMs
 
-    // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
-    // the read and the clear is never lost.
-    private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
-
     // The wake policy, passed on every start() so a start() during an open request joins it. PcmCapture runs its
     // capture-thread callbacks only for the current capture request, only while open, and never two at once.
     private val listener = object : PcmCapture.Listener {
@@ -82,7 +78,6 @@ class WakeMicEngine internal constructor(
         }
 
         override fun onFrame(buf: ByteArray, n: Int) {
-            applyPendingWakeWords()
             if (inHandoffCooldown()) return // the wake detector hears none of these frames
             detector.accept(buf, n)?.let(::deliver)
         }
@@ -153,12 +148,10 @@ class WakeMicEngine internal constructor(
     }
 
     /**
-     * Hot-swap wake words without restarting capture: the wake detector rebuilds its grammar on the model it has,
-     * before its next frame.
+     * Hot-swap wake words without restarting capture, from any thread. Forwarded to the wake detector, which owns the
+     * current wake words and rebuilds its grammar on the model it has before the next frame it decodes.
      */
-    fun updateWakeWords(words: List<WakeWord>) {
-        pendingWakeWords.set(words)
-    }
+    fun updateWakeWords(words: List<WakeWord>) = detector.updateWakeWords(words)
 
     /**
      * Ends the capture request and yields the mic slot. Reports no capture loss, and cancels one already posted but
@@ -182,12 +175,6 @@ class WakeMicEngine internal constructor(
      * close from the main thread usually blocks it past the deadline.
      */
     fun close() = capture.close()
-
-    private fun applyPendingWakeWords() {
-        val words = pendingWakeWords.getAndSet(null) ?: return
-        config.log("wake set changed → rebuilding grammar (${words.size} word(s))")
-        detector.updateWakeWords(words)
-    }
 
     companion object {
         const val MIC_READ_FAILURES_BEFORE_REBUILD = 40

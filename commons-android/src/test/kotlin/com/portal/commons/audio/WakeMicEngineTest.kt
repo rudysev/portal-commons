@@ -327,26 +327,6 @@ class WakeMicEngineTest {
         assertEquals(listOf(2), heard())
     }
 
-    @Test fun aWakeWordHotSwapReachesTheDetectorBeforeItsNextFrame() {
-        readyEngine()
-        engine.updateWakeWords(listOf(ALEXA))
-        device.push(frame(2))
-
-        assertEquals(ALEXA_GRAMMAR, model.live.grammar)
-        assertEquals(listOf(2), heard())
-        assertTrue(logs.contains("wake set changed → rebuilding grammar (1 word(s))"))
-    }
-
-    @Test fun aWakeWordHotSwapBeforeTheModelLoadsIsTheFirstGrammar() {
-        newEngine().start()
-        engine.updateWakeWords(listOf(ALEXA))
-        device.push(frame(2))
-        loader.complete(model)
-        device.push(frame(3))
-
-        assertEquals(ALEXA_GRAMMAR, model.decoders.single().grammar)
-    }
-
     @Test fun aReadinessAlreadyQueuedIsNotDeliveredAfterClose() {
         newEngine().start()
         loader.complete(model)

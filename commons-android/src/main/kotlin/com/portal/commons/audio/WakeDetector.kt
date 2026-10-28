@@ -5,23 +5,29 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The **wake detector** (see `GLOSSARY.md`), Vosk (free, keyless, offline): model handoff, the wake words stored before
- * it is ready, and the pre-ready buffer + replay. Decoding — the Decoder, grammar, warm-up, result parsing, the
+ * The **wake detector** (see `GLOSSARY.md`), Vosk (free, keyless, offline): model handoff, the wake-word handoff, and
+ * the pre-ready buffer + replay. Decoding — the Decoder, grammar, warm-up, result parsing, the
  * [WakeMatcher] call and the idle reset that bounds Vosk's decode lattice — lives in the [WakeDecoder]. Native libvosk
  * sits behind the [VoskModelLoader] / [VoskModel] / [VoskDecoder] seam; the mic lives in [WakeMicEngine], which holds
  * exactly one of these.
  *
- * **Threading contract.** [start], [accept] and [updateWakeWords] run on the engine's capture thread at frame
- * boundaries, never two at once, even when a wedged capture session is rebuilt while the old capture thread is still
+ * **Threading contract.** [start] and [accept] run on the engine's capture thread at frame boundaries, never two at
+ * once, even when a wedged capture session is rebuilt while the old capture thread is still
  * inside a call (two threads in one Decoder abort the process), so capture-thread state needs no locks. [close] runs at
  * most once and never during another call: from the thread closing the engine, or by the capture thread as it leaves a
- * call the engine's bounded close outlasted.
+ * call the engine's bounded close outlasted. [updateWakeWords] is safe from any thread.
  *
  * **The capture thread owns the wake decoder.** The loader only hands the model over ([delivered]); the next
  * frame adopts it, creating the wake decoder from the *current* wake words, then calls [onReady] (or
  * [onUnavailable] if its first Decoder can't be built). A model-*load* failure calls [onUnavailable] straight from
  * the loader. One thread touches decoders, so no locks. Readiness is frame-driven, so it never comes while capture
  * is paused.
+ *
+ * **The wake-word handoff mirrors it.** [updateWakeWords] only hands the new wake words over ([pendingWakeWords]); the
+ * next [accept] takes them before it decodes anything, so they apply before the frame they landed ahead of, however
+ * many frames the engine skipped in between. Before the wake decoder exists they become the current wake words, which
+ * adoption builds its first Decoder from; after, the wake decoder swaps its Decoder, keeping the old one and the old
+ * wake words if the new one can't be built. Only the latest update counts.
  *
  * **Per-frame policy** ([accept]): until a wake decoder exists, ring-buffer frames (so speech during init isn't
  * lost); on adoption, replay them; then feed the wake decoder. **On (re)start** ([start]) the wake decoder is reset
@@ -50,12 +56,16 @@ internal class WakeDetector(
     // close()). Atomic so a delivery racing close() frees the model exactly once.
     private val delivered = AtomicReference<VoskModel?>(null)
 
+    // The any-thread → capture-thread wake-word handoff, taken by the next frame. Taken in one step, so an update that
+    // lands while a frame takes the previous one is never lost.
+    private val pendingWakeWords = AtomicReference<List<WakeWord>?>(null)
+
     @Volatile private var closed = false
 
     // Capture-thread state. close() also touches it, but only after capture stops, under the engine's lock.
     private var wakeDecoder: WakeDecoder? = null // non-null ⇔ ready
 
-    // The wake set stored until the wake decoder exists; adoption builds its first Decoder from it.
+    // The wake set until the wake decoder exists (which then owns it); adoption builds its first Decoder from it.
     private var wakeWords: List<WakeWord> = initialWakeWords
 
     private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
@@ -99,6 +109,7 @@ internal class WakeDetector(
      * none. At most one wake per call. The engine may skip frames, so this never assumes it hears every one.
      */
     fun accept(buf: ByteArray, n: Int): WakeEvent? {
+        applyPendingWakeWords()
         val wd = wakeDecoder ?: adoptDeliveredModel()
         if (wd == null) {
             preReadyBuffer.add(buf, n)
@@ -113,13 +124,12 @@ internal class WakeDetector(
     }
 
     /**
-     * Swap to a new wake set **without reloading the model** ([WakeDecoder.updateWakeWords]). Runs on the capture
-     * thread at a frame boundary, so a Decoder is never closed mid-[accept]. Before the wake decoder exists, just
-     * store the set — adoption builds from it.
+     * Swap to a new wake set **without reloading the model** ([WakeDecoder.updateWakeWords]), from any thread. It is
+     * applied on the capture thread at the next [accept], before that frame is decoded, so a Decoder is never closed
+     * mid-[accept]. Before the wake decoder exists it becomes the set adoption builds from.
      */
     fun updateWakeWords(words: List<WakeWord>) {
-        val wd = wakeDecoder
-        if (wd == null) wakeWords = words else wd.updateWakeWords(words)
+        pendingWakeWords.set(words)
     }
 
     /** Full teardown: frees the wake decoder, and the model if it was delivered but never adopted. */
@@ -129,6 +139,14 @@ internal class WakeDetector(
         backlog.clear()
         wakeDecoder?.close()
         wakeDecoder = null
+    }
+
+    /** Take the latest wake-word update, if any, and apply it (capture thread, at a frame boundary). */
+    private fun applyPendingWakeWords() {
+        val words = pendingWakeWords.getAndSet(null) ?: return
+        diagnostic("wake set changed → rebuilding grammar (${words.size} word(s))")
+        val wd = wakeDecoder
+        if (wd == null) wakeWords = words else wd.updateWakeWords(words)
     }
 
     /**
