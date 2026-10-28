@@ -44,11 +44,8 @@ import java.util.concurrent.atomic.AtomicReference
  * in [PcmCapture], whose `onClosed` closes the wake detector; this class keeps the wake policy: the handoff cooldown,
  * the wake-word hot-swap and the routing of the wake detector's callbacks.
  *
- * **The wake detector's calls.** Its start, frames and wake-word swaps all run on the capture thread at frame
- * boundaries, never two at once, even when a wedged capture session is rebuilt while the old capture thread is still
- * inside a call (two threads in one Vosk recognizer abort the process). Its close runs at most once, never mid-call.
- * Readiness comes on the capture thread at the first frame after the model loads (so not while capture is paused),
- * and a failed model load is reported from the model-load thread; both reach the consumer on the main thread.
+ * **The wake detector's calls** follow the threading contract on [WakeDetector]. Its readiness and unavailability
+ * reach the consumer on the main thread.
  */
 class WakeMicEngine internal constructor(
     private val config: WakeMicConfig,
@@ -121,7 +118,7 @@ class WakeMicEngine internal constructor(
             deliverOnMain { config.onReady() }
         },
         onUnavailable = {
-            config.log("wake unavailable — detector idle")
+            config.log("wake detector unavailable")
             deliverOnMain { config.onUnavailable() }
         },
         diagnostic = config.log,

@@ -259,7 +259,7 @@ class WakeMicEngineTest {
         runPosted()
 
         assertEquals(1, unavailable.get())
-        assertEquals(listOf("wake unavailable — detector idle"), logs)
+        assertEquals(listOf("wake detector unavailable"), logs)
     }
 
     @Test fun aFirstDecoderThatCannotBeBuiltIsUnavailable() {
