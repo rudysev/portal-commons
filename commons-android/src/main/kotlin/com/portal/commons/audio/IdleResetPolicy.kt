@@ -1,7 +1,7 @@
 package com.portal.commons.audio
 
 /**
- * Decides **when** [VoskWakeDetector] should bound Vosk's native decode lattice with a decoder reset.
+ * Decides **when** the [WakeDecoder] should bound Vosk's native decode lattice with a decoder reset.
  *
  * The lattice only grows while Vosk is *not* endpointing: with continuous audio the grammar decoder can
  * go a long time without finalizing, and the never-bounded lattice grows ~3.8 MB/min (measured
