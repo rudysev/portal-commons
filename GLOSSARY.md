@@ -10,6 +10,10 @@ Shared mic capture and on-device wake-word detection for the Portal wake/voice a
 Vosk's streaming speech recognizer, built for one grammar, that turns audio frames into partial and final decodes.
 _Avoid_: recognizer (overloaded with the Vosk class and the old wrapper)
 
+**Wake decoder**:
+One **Decoder** at a time for the current wake words, and the judgement of each decode it finalizes as a wake, a near-miss or nothing. It replaces its Decoder when the wake words change, keeping the old one if the new one can't be built, and bounds the **lattice** with the **idle reset**.
+_Avoid_: decoder session, recognizer
+
 **Lattice**:
 The decoder's in-memory hypothesis state for the current utterance; it grows until a natural endpoint or a reset bounds it.
 _Avoid_: current utterance buffer
