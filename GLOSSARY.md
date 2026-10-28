@@ -15,7 +15,7 @@ Vosk's streaming speech recognizer, built for one grammar, that turns audio fram
 _Avoid_: recognizer (overloaded with the Vosk class and the old wrapper)
 
 **Wake detector**:
-Turns captured frames into wakes once the **wake model** has loaded: it adopts the model when it arrives, holds the **pre-ready buffer** until then and replays it afterwards, and feeds every frame to the **wake decoder**.
+Turns captured frames into wakes once the **wake model** has loaded: it adopts the model when it arrives, holds the **pre-ready buffer** until then and replays it afterwards, and feeds every frame outside the **handoff cooldown** to the **wake decoder**.
 _Avoid_: detector engine, recognizer
 
 **Wake decoder**:
@@ -31,7 +31,7 @@ A backstop reset of the decoder that bounds the lattice when no natural endpoint
 _Avoid_: periodic reset, lattice flush
 
 **Handoff cooldown**:
-The single window after any wake fires during which the engine feeds no frames to the **wake detector**, so no wake of any wake id arises, covering the gap until capture pauses for the handoff.
+The single window after any wake fires during which the **wake detector** ignores every frame, so no wake of any wake id arises, covering the gap until capture pauses for the handoff.
 _Avoid_: fire cooldown, de-dupe window
 
 **Pre-ready buffer**:
