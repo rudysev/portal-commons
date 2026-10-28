@@ -1,7 +1,7 @@
 package com.portal.commons.audio
 
 /*
- * The seam under the Vosk detector: the only place native libvosk is touched. Everything above it — grammar
+ * The seam under the wake detector: the only place native libvosk is touched. Everything above it — grammar
  * building, warm-up, JSON parsing, [WakeMatcher], idle reset, replay, grammar hot-swap — runs in JVM tests
  * against fakes. The libvosk adapters ([LibVoskModelLoader], [LibVoskModel], [LibVoskDecoder]) are thin
  * pass-throughs.
