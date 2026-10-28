@@ -17,10 +17,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Drives a real [WakeMicEngine] capture thread one frame at a time with a [SteppedDevice] and a hand-set clock, so the
- * handoff cooldown and the consumer callback routing are observable from outside. The detector is the real Vosk wake
+ * engine's wiring and the consumer callback routing are observable from outside. The detector is the real Vosk wake
  * detector over the Vosk fakes ([FakeVoskLoader] / [FakeVoskModel] / [ScriptedDecoder]): a wake is a confident
- * "hey jarvis" final queued on the model and decoded at an endpoint frame, and readiness, unavailability and the
- * pre-ready replay are the detector's own, and the engine's [WakeModel] reaches the detector through `newLoader`.
+ * "hey jarvis" final queued on the model and decoded at an endpoint frame, and readiness, unavailability, the
+ * pre-ready replay and the handoff cooldown are the detector's own (covered by [WakeDetectorTest]); the engine's
+ * [WakeModel] and clock reach the detector through `newLoader` and `clock`.
  */
 class WakeMicEngineTest {
 
@@ -187,43 +188,14 @@ class WakeMicEngineTest {
         if (::engine.isInitialized) engine.close()
     }
 
-    @Test fun noFrameReachesTheDetectorUntilTheHandoffCooldownElapses() {
+    @Test fun aWakeFollowedByFramesInsideTheHandoffCooldownReachesTheConsumerOnce() {
         readyEngine()
         pushWake(2)
-        nowMs = 500L
-        device.push(frame(3))
         nowMs = 1_499L
-        device.push(frame(4))
-        nowMs = 1_500L
-        device.push(frame(5))
-
-        assertEquals(listOf(TAG_PRIME, 2, 5), heard())
-    }
-
-    @Test fun aWakeExactlyWhenTheCooldownElapsesIsDeliveredAndOpensAFreshWindow() {
-        readyEngine()
-        pushWake(2)
-        nowMs = 1_500L
-        pushWake(3)
-        nowMs = 2_999L
-        device.push(frame(4))
-        nowMs = 3_000L
-        device.push(frame(5))
-
-        assertEquals(listOf("jarvis", "jarvis"), wakes.map { it.wakeId })
-        assertEquals(listOf(TAG_PRIME, 2, 3, 5), heard())
-    }
-
-    @Test fun restartingCaptureClosesTheCooldown() {
-        readyEngine()
-        pushWake(2)
-        nowMs = 500L
-        engine.pause()
-        engine.start()
         pushWake(3)
 
-        assertEquals(listOf(TAG_PRIME, 2, 3), heard())
-        assertEquals(listOf("jarvis", "jarvis"), wakes.map { it.wakeId })
+        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
+        assertEquals(listOf(TAG_PRIME, 2), heard())
     }
 
     @Test fun theWakeDetectorLoadsTheConfiguredWakeModel() {
@@ -302,29 +274,6 @@ class WakeMicEngineTest {
         runPosted()
 
         assertEquals(1, unavailable.get())
-    }
-
-    @Test fun framesCapturedWhileTheModelLoadsAreReplayedOnceItIsReady() {
-        newEngine().start()
-        device.push(frame(2))
-        device.push(frame(3))
-        loader.complete(model)
-        device.push(frame(4))
-
-        assertEquals(listOf(2, 3, 4), heard())
-        assertTrue(logs.contains("flushing 2 pre-ready frame(s)"))
-    }
-
-    @Test fun aWakeInTheReplayedFramesIsDelivered() {
-        newEngine().start()
-        model.finals.add(HEY_JARVIS_CONFIDENT)
-        device.push(frame(2, endpoint = true))
-        loader.complete(model)
-        device.push(frame(3))
-        device.push(frame(4)) // inside the handoff cooldown the wake opened
-
-        assertEquals(listOf("jarvis"), wakes.map { it.wakeId })
-        assertEquals(listOf(2), heard())
     }
 
     @Test fun aReadinessAlreadyQueuedIsNotDeliveredAfterClose() {
