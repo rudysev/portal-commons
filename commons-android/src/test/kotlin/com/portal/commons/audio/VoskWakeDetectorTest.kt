@@ -21,17 +21,17 @@ class VoskWakeDetectorTest {
 
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()
-    private val events = RecordingEvents()
+    private val callbacks = RecordingCallbacks()
 
     private fun detector(words: List<WakeWord> = listOf(JARVIS), loader: VoskModelLoader = this.loader) =
-        VoskWakeDetector(loader, words, events, clock = { 0L })
+        callbacks.detector(loader, words)
 
-    /** A detector whose model has loaded and which has been started, with the event log cleared. */
+    /** A detector whose model has loaded and which has been started, with the callback log cleared. */
     private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): VoskWakeDetector = detector(words).also {
         loader.complete(model)
         it.start()
         it.accept(frame(TAG_PRIME), FRAME)
-        events.lines.clear()
+        callbacks.lines.clear()
     }
 
     /** Feed one finalizing frame that decodes [json]; returns the wake [WakeDetector.accept] returned, if any. */
@@ -44,7 +44,7 @@ class VoskWakeDetectorTest {
 
     @Test fun confidentWakeIsReturnedWithItsDecode() {
         assertEquals(wake("jarvis", "hey(97) jarvis(81)"), readyDetector().decode(HEY_JARVIS_CONFIDENT))
-        assertEquals(emptyList<String>(), events.lines)
+        assertEquals(emptyList<String>(), callbacks.lines)
     }
 
     // ---- model load + first decoder build → readiness -----------------------------------------------
@@ -53,19 +53,19 @@ class VoskWakeDetectorTest {
         val d = detector()
         loader.complete(model)
         d.accept(frame(2), FRAME)
-        assertEquals(listOf("ready"), events.lines)
+        assertEquals(listOf("ready"), callbacks.lines)
         assertEquals(listOf(2), model.live.fedTags())
     }
 
     @Test fun modelLoadFailureIsUnavailable() {
         detector()
         loader.fail()
-        assertEquals(listOf("unavailable"), events.lines)
+        assertEquals(listOf("unavailable"), callbacks.lines)
     }
 
     @Test fun loaderThatThrowsIsUnavailable() {
         detector(loader = FakeVoskLoader(throwOnLoad = true))
-        assertEquals(listOf("unavailable"), events.lines)
+        assertEquals(listOf("unavailable"), callbacks.lines)
     }
 
     @Test fun firstDecoderBuildFailureIsUnavailable() {
@@ -73,7 +73,7 @@ class VoskWakeDetectorTest {
         val d = detector()
         loader.complete(model)
         d.accept(frame(2), FRAME)
-        assertEquals(listOf("unavailable"), events.lines)
+        assertEquals(listOf("unavailable"), callbacks.lines)
         assertTrue(model.decoders.isEmpty())
         assertEquals(1, model.closeCount)
     }
@@ -110,7 +110,7 @@ class VoskWakeDetectorTest {
         d.accept(frame(6), FRAME)
 
         assertEquals(listOf(2, 3, 4, 5, 6), model.live.fedTags())
-        assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), events.lines)
+        assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), callbacks.lines)
     }
 
     @Test fun eachFrameDecodesAtMostThreeReplayedFramesWithLiveFramesQueuedBehind() {
@@ -161,7 +161,7 @@ class VoskWakeDetectorTest {
         (capacity + 3..caughtUp).forEach { d.accept(frame(it), FRAME) }
 
         assertEquals((3..caughtUp).toList(), model.live.fedTags())
-        assertEquals("flushing $capacity pre-ready frame(s)", events.lines.last())
+        assertEquals("flushing $capacity pre-ready frame(s)", callbacks.lines.last())
     }
 
     @Test fun preReadyFramesAreReplayedOnlyOnce() {
@@ -173,7 +173,7 @@ class VoskWakeDetectorTest {
         d.accept(frame(4), FRAME)
 
         assertEquals(listOf(2, 3, 4), model.live.fedTags())
-        assertEquals(listOf("ready", "flushing 1 pre-ready frame(s)"), events.lines)
+        assertEquals(listOf("ready", "flushing 1 pre-ready frame(s)"), callbacks.lines)
     }
 
     @Test fun replayStopsAtTheFirstWakeAndDropsTheRestOfTheBacklog() {
@@ -191,7 +191,7 @@ class VoskWakeDetectorTest {
         assertEquals(wake("jarvis", "hey(97) jarvis(81)"), replayed)
         assertNull(live)
         assertEquals(listOf(2, 6), model.live.fedTags())
-        assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), events.lines)
+        assertEquals(listOf("ready", "flushing 3 pre-ready frame(s)"), callbacks.lines)
     }
 
     // ---- close --------------------------------------------------------------------------------------

@@ -159,19 +159,20 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
     }
 }
 
-/** Records every [WakeDetector.Events] callback as a line: `ready`, `unavailable`, or the diagnostic. */
-internal class RecordingEvents : WakeDetector.Events {
+/**
+ * Records the Vosk detector's readiness, unavailability and diagnostics as lines: `ready`, `unavailable`, or the
+ * diagnostic.
+ */
+internal class RecordingCallbacks {
     val lines = CopyOnWriteArrayList<String>()
 
-    override fun onReady(detectorId: String) {
-        lines.add("ready")
-    }
+    val onReady: () -> Unit = { lines.add("ready") }
 
-    override fun onUnavailable(detectorId: String) {
-        lines.add("unavailable")
-    }
+    val onUnavailable: () -> Unit = { lines.add("unavailable") }
 
-    override fun onDiagnostic(detectorId: String, message: String) {
-        lines.add(message)
-    }
+    val diagnostic: (String) -> Unit = { lines.add(it) }
+
+    /** A [VoskWakeDetector] that reports here, on a frozen idle-reset clock. */
+    fun detector(loader: VoskModelLoader, words: List<WakeWord>): VoskWakeDetector =
+        VoskWakeDetector(loader, words, onReady, onUnavailable, diagnostic, clock = { 0L })
 }

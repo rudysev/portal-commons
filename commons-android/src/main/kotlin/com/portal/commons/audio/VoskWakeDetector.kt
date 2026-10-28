@@ -12,9 +12,9 @@ import java.util.concurrent.atomic.AtomicReference
  * [VoskModelLoader] / [VoskModel] / [VoskDecoder] seam; the mic lives in [WakeMicEngine].
  *
  * **The capture thread owns the wake decoder.** The loader only hands the model over ([delivered]); the next
- * frame adopts it, creating the wake decoder from the *current* wake words, then signals
- * [WakeDetector.Events.onReady] (or [WakeDetector.Events.onUnavailable] if its first Decoder can't be built). A
- * model-*load* failure signals unavailable straight from the loader. One thread touches decoders, so no locks.
+ * frame adopts it, creating the wake decoder from the *current* wake words, then calls [onReady] (or
+ * [onUnavailable] if its first Decoder can't be built). A model-*load* failure calls [onUnavailable] straight from
+ * the loader. One thread touches decoders, so no locks.
  *
  * **Per-frame policy** ([accept]): until a wake decoder exists, ring-buffer frames (so speech during init isn't
  * lost); on adoption, replay them; then feed the wake decoder. **On (re)start** ([start]) the wake decoder is reset
@@ -27,12 +27,17 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
  * rest of the backlog, the live frames queued behind it included.
- * A match is [accept]'s return value; the wake decoder's diagnostics go out as [WakeDetector.Events.onDiagnostic].
+ * A match is [accept]'s return value; the wake decoder's diagnostics go out through [diagnostic].
+ *
+ * Readiness, unavailability and diagnostics are plain lambdas, as in the [WakeDecoder]; [factory] adapts the
+ * host's events onto them.
  */
 internal class VoskWakeDetector(
     loader: VoskModelLoader,
     initialWakeWords: List<WakeWord>,
-    private val events: WakeDetector.Events,
+    private val onReady: () -> Unit,
+    private val onUnavailable: () -> Unit,
+    private val diagnostic: (String) -> Unit,
     // Monotonic milliseconds, for the idle-reset clock (a wall-clock jump could force a mid-decode reset).
     // Injected so tests drive time.
     private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
@@ -59,7 +64,7 @@ internal class VoskWakeDetector(
 
     init {
         try {
-            loader.load(::onModelDelivered) { events.onUnavailable(ID) }
+            loader.load(::onModelDelivered, onUnavailable)
         } catch (
             // Throwable, not Exception: native init fails with Errors too (UnsatisfiedLinkError from libvosk).
             @Suppress("SwallowedException", "TooGenericExceptionCaught")
@@ -67,7 +72,7 @@ internal class VoskWakeDetector(
         ) {
             // The throwable is intentionally swallowed: don't let a model-load / native-init failure crash the
             // service. By contract any init failure is surfaced as onUnavailable, which the engine's consumer logs.
-            events.onUnavailable(ID)
+            onUnavailable()
         }
     }
 
@@ -125,14 +130,14 @@ internal class VoskWakeDetector(
      */
     private fun adoptDeliveredModel(): WakeDecoder? {
         val m = delivered.getAndSet(null) ?: return null
-        val wd = WakeDecoder.create(m, wakeWords, diagnostic = { events.onDiagnostic(ID, it) }, clock = clock)
+        val wd = WakeDecoder.create(m, wakeWords, diagnostic, clock = clock)
         if (wd == null) {
-            events.onUnavailable(ID)
+            onUnavailable()
         } else {
             wakeDecoder = wd
-            events.onReady(ID)
+            onReady()
             val buffered = preReadyBuffer.drain()
-            if (buffered.isNotEmpty()) events.onDiagnostic(ID, "flushing ${buffered.size} pre-ready frame(s)")
+            if (buffered.isNotEmpty()) diagnostic("flushing ${buffered.size} pre-ready frame(s)")
             backlog.addAll(buffered)
         }
         return wd
@@ -165,7 +170,9 @@ internal class VoskWakeDetector(
             VoskWakeDetector(
                 LibVoskModelLoader(host.context, modelDir),
                 host.wakeWords,
-                host.events,
+                onReady = { host.events.onReady(ID) },
+                onUnavailable = { host.events.onUnavailable(ID) },
+                diagnostic = { host.events.onDiagnostic(ID, it) },
             )
         }
     }
