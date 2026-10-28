@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.concurrent.thread
 
 /**
  * The [WakeDetector], tested through its own methods only. Native libvosk is replaced at the seam
@@ -84,6 +85,22 @@ class WakeDetectorTest {
         loader.complete(model)
         d.accept(frame(2), FRAME)
         assertEquals(ALEXA_GRAMMAR, model.decoders.single().grammar)
+    }
+
+    // ---- wake-word hot swap -------------------------------------------------------------------------
+
+    @Test fun aWakeWordUpdateFromAnotherThreadIsAppliedAtTheNextFrame() {
+        val d = readyDetector()
+        val old = model.live
+        thread(name = "controller") { d.updateWakeWords(listOf(ALEXA)) }.join()
+        assertEquals("no Decoder built off the capture thread", listOf(old), model.decoders)
+
+        d.accept(frame(2), FRAME)
+
+        assertTrue(old.closed)
+        assertEquals(ALEXA_GRAMMAR, model.live.grammar)
+        assertEquals(listOf(2), model.live.fedTags())
+        assertEquals(listOf("wake set changed → rebuilding grammar (1 word(s))"), callbacks.lines)
     }
 
     // ---- start ---------------------------------------------------------------------------------------
