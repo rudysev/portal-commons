@@ -1,5 +1,6 @@
 package com.portal.commons.audio
 
+import android.content.Context
 import com.portal.commons.PcmCaptureFormat
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -166,9 +167,13 @@ internal class VoskWakeDetector(
          */
         const val REPLAY_FRAMES_PER_ACCEPT = 3
 
-        fun factory(modelDir: File? = null): WakeDetector.Factory = WakeDetector.Factory { host ->
+        fun factory(modelDir: File? = null): WakeDetector.Factory =
+            factory(newLoader = { LibVoskModelLoader(it, modelDir) })
+
+        /** The factory over [newLoader], the seam where engine tests substitute the Vosk fakes for native libvosk. */
+        fun factory(newLoader: (Context) -> VoskModelLoader): WakeDetector.Factory = WakeDetector.Factory { host ->
             VoskWakeDetector(
-                LibVoskModelLoader(host.context, modelDir),
+                newLoader(host.context),
                 host.wakeWords,
                 onReady = { host.events.onReady(ID) },
                 onUnavailable = { host.events.onUnavailable(ID) },
