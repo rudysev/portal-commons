@@ -10,9 +10,8 @@ import java.util.concurrent.TimeUnit
  * Captures the mic through one [PcmCapture] and feeds each captured frame to its one **wake detector** (see
  * `GLOSSARY.md`), which loads the [WakeMicConfig.model] and turns frames into wakes.
  *
- * The **handoff cooldown** (one window after a wake, [WakeMicConfig.wakeHandoffCooldownMs] long, in which no further
- * wake arises; (re)starting capture closes it) is the wake detector's. The engine injects its one monotonic clock,
- * which drives both that window and the wake detector's idle reset.
+ * The [WakeDetector] owns the **handoff cooldown**, [WakeMicConfig.wakeHandoffCooldownMs] long. The engine injects its
+ * one monotonic clock, which drives both the cooldown and the wake detector's idle reset.
  *
  * Delivers each wake to [WakeMicConfig.onWake] synchronously on the capture thread, and the wake detector's readiness
  * and unavailability to the consumer on the main thread. Each gets a log line, as does each diagnostic.
@@ -39,10 +38,9 @@ import java.util.concurrent.TimeUnit
  * Caller must hold RECORD_AUDIO. Consumer callback threading is documented on [WakeMicConfig].
  *
  * The capture lifecycle (capture requests, serialized wake detector calls, the closed state, the bounded close) lives
- * in [PcmCapture], whose `onClosed` closes the wake detector, and the handoff cooldown and the current wake words live
- * in the wake detector, which takes a hot swap from any thread ([updateWakeWords] only forwards it). This class keeps
- * the closed check on delivery, the wake log line, and the routing and posting of the wake detector's callbacks: its
- * frame listener is plain wiring (start → wake detector start, frame → wake detector accept → deliver).
+ * in [PcmCapture], whose `onClosed` closes the wake detector; the current wake words live in the wake detector, which
+ * takes a hot swap from any thread ([updateWakeWords] only forwards it). This class keeps the closed check on delivery,
+ * the wake log line, and the routing and posting of the wake detector's callbacks.
  *
  * **The wake detector's calls** follow the threading contract on [WakeDetector]. Its readiness and unavailability
  * reach the consumer on the main thread.
