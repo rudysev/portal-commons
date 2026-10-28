@@ -11,14 +11,14 @@ import java.util.concurrent.atomic.AtomicReference
  * Captures the mic through one [PcmCapture] and fans each captured frame to every configured [WakeDetector].
  * Recognition policy lives behind the [WakeDetector] seam.
  *
- * Owns the **handoff cooldown**: one window, opened when any wake is delivered and lasting
- * [WakeMicConfig.wakeHandoffCooldownMs] on a monotonic clock. Inside it no detector is fed a frame and every
- * further wake, whatever its wake id, is dropped (and logged) before it reaches [WakeMicConfig.onWake]. This
- * covers the ~1 frame between a match and capture actually pausing for the handoff. (Re)starting capture closes
- * the window.
+ * Owns the **handoff cooldown**: one window, opened when any detector returns a wake from [WakeDetector.accept] and
+ * lasting [WakeMicConfig.wakeHandoffCooldownMs] on a monotonic clock. Inside it no detector is fed a frame, so no
+ * wake of any wake id arises; nor is the rest of the frame that woke fed to the other detectors. This
+ * covers the ~1 frame between a match and capture actually pausing for the handoff. (Re)starting capture closes the
+ * window.
  *
- * Routes [WakeDetector.Events] to the consumer: [WakeMicConfig.onWake] synchronously on the capture thread,
- * readiness and unavailability on the main thread, and a log line for each.
+ * Delivers each wake a detector returns to [WakeMicConfig.onWake] synchronously on the capture thread, and routes
+ * [WakeDetector.Events] to the consumer: readiness and unavailability on the main thread. Each gets a log line.
  *
  * Owns **capture loss** (see `GLOSSARY.md`), reported through [WakeMicConfig.onCaptureLost], at most once per
  * **capture request**, which [PcmCapture] tracks: a wedged older capture thread's frames reach no detector, and
@@ -56,11 +56,11 @@ class WakeMicEngine internal constructor(
     constructor(context: Context, config: WakeMicConfig) :
         this(context, config, ::AudioRecordPcmDevice, WakeCallbackThreads.mainThreadPoster())
 
-    // The handoff cooldown is open while clock() is before this instant. Touched on the capture thread only: under
-    // PcmCapture's callback lock in onStarted/onFrame, and in onWake, which detectors raise from inside accept.
+    // The handoff cooldown is open while clock() is before this instant. Touched on the capture thread only, under
+    // PcmCapture's callback lock in onStarted/onFrame.
     private var handoffCooldownUntilMs = Long.MIN_VALUE
 
-    private fun inHandoffCooldown(nowMs: Long = clock()): Boolean = nowMs < handoffCooldownUntilMs
+    private fun inHandoffCooldown(): Boolean = clock() < handoffCooldownUntilMs
 
     // Set from any thread, taken on the capture thread. Read and cleared in one step, so an update that lands between
     // the read and the clear is never lost.
@@ -76,11 +76,11 @@ class WakeMicEngine internal constructor(
 
         override fun onFrame(buf: ByteArray, n: Int) {
             applyPendingWakeWords(detectors)
-            // The handoff cooldown: no detector hears these frames, including the rest of the frame a wake just
-            // fired on.
+            if (inHandoffCooldown()) return // no detector hears these frames
             for (detector in detectors) {
-                if (inHandoffCooldown()) return
-                detector.accept(buf, n)
+                val wake = detector.accept(buf, n) ?: continue
+                deliver(wake) // opens the cooldown: no other detector hears the rest of this frame
+                return
             }
         }
 
@@ -128,25 +128,22 @@ class WakeMicEngine internal constructor(
             deliverOnMain { config.onDetectorUnavailable(detectorId) }
         }
 
-        // Detectors raise a wake only from inside accept, so this runs under PcmCapture's callback lock. close()
-        // leaves the open state before it waits for that lock: a wake past the closed check is one close() waits for
-        // (or gives up on, as already begun).
-        override fun onWake(event: WakeEvent) {
-            val nowMs = clock()
-            if (inHandoffCooldown(nowMs)) {
-                config.log("wake dropped (handoff cooldown) → ${event.wakeId} [${event.transcript}]")
-                return
-            }
-            handoffCooldownUntilMs = nowMs + config.wakeHandoffCooldownMs
-            config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
-            if (capture.isClosed) {
-                config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
-                return
-            }
-            config.onWake(event)
-        }
-
         override fun onDiagnostic(detectorId: String, message: String) = config.log("($detectorId) $message")
+    }
+
+    /**
+     * Opens the handoff cooldown and delivers [event] to [WakeMicConfig.onWake]. Runs in onFrame, under PcmCapture's
+     * callback lock. close() leaves the open state before it waits for that lock: a wake past the closed check is one
+     * close() waits for (or gives up on, as already begun).
+     */
+    private fun deliver(event: WakeEvent) {
+        handoffCooldownUntilMs = clock() + config.wakeHandoffCooldownMs
+        config.log("wake detected (${event.detectorId}) → ${event.wakeId} [${event.transcript}]")
+        if (capture.isClosed) {
+            config.log("wake dropped (closed) → ${event.wakeId} [${event.transcript}]")
+            return
+        }
+        config.onWake(event)
     }
 
     /**

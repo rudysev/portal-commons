@@ -28,11 +28,10 @@ import java.util.concurrent.atomic.AtomicReference
  * buffer in one call (~38 ms a frame on gen2, so 1–2 s) held the capture thread inside the callback past a
  * pause's stop join, and the stop force-released the mic. A [start] drops a backlog left by the previous capture.
  *
- * The **handoff cooldown** is [WakeMicEngine]'s single window after any wake: it simply stops feeding frames,
- * so this detector never sees it. The one place it would otherwise leak in is replay — the backlog holds audio
- * from before the wake — so a wake from the backlog drops the rest of it.
- * A match reports via [WakeDetector.Events.onWake]; diagnostics carry the exact `near-miss …` /
- * `flushed final …` strings the mic owner used to log.
+ * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
+ * rest of the backlog, the live frames queued behind it included.
+ * A match is [accept]'s return value; diagnostics carry the exact `near-miss …` / `flushed final …` strings the mic
+ * owner used to log.
  */
 internal class VoskWakeDetector(
     loader: VoskModelLoader,
@@ -96,15 +95,15 @@ internal class VoskWakeDetector(
         idleReset.noteFlushed(clock())
     }
 
-    override fun accept(buf: ByteArray, n: Int) {
+    override fun accept(buf: ByteArray, n: Int): WakeEvent? {
         if (decoder == null) {
             if (!adoptDeliveredModel()) {
                 preReadyBuffer.add(buf, n)
-                return
+                return null
             }
         }
         maybeIdleReset()
-        if (backlog.isEmpty()) {
+        return if (backlog.isEmpty()) {
             decode(buf, n)
         } else {
             backlog.addLast(buf.copyOf(n))
@@ -166,17 +165,15 @@ internal class VoskWakeDetector(
     }
 
     /**
-     * Decode up to [REPLAY_FRAMES_PER_ACCEPT] backlog frames in order. A wake drops the rest: it was captured before
-     * the wake, so live it would have fallen inside the handoff cooldown.
+     * Decode up to [REPLAY_FRAMES_PER_ACCEPT] backlog frames in order, returning the first wake. A wake drops the rest:
+     * it was buffered before the wake, so it is never decoded after it.
      */
-    private fun decodeBacklog() {
-        repeat(REPLAY_FRAMES_PER_ACCEPT) {
-            val frame = backlog.removeFirstOrNull() ?: return
-            if (decode(frame, frame.size)) {
-                backlog.clear()
-                return
-            }
-        }
+    private fun decodeBacklog(): WakeEvent? {
+        val wake = generateSequence { backlog.removeFirstOrNull() }
+            .take(REPLAY_FRAMES_PER_ACCEPT)
+            .firstNotNullOfOrNull { decode(it, it.size) }
+        if (wake != null) backlog.clear()
+        return wake
     }
 
     private fun maybeIdleReset() {
@@ -200,26 +197,27 @@ internal class VoskWakeDetector(
      * Feed one frame. When it finalizes a decode (Vosk endpointed) the lattice was just flushed; report a
      * match, a near-miss (a keyword decoded but a gate rejected it), or a non-empty keyword-free decode — a
      * leading "hey" swallowed into a finalization right before the keyword decodes alone surfaces there (the
-     * dropped-lead suspect). The decode is carried so the log shows *what Vosk heard*. True if a wake fired.
+     * dropped-lead suspect). The decode is carried so the log shows *what Vosk heard*. Returns the wake, if one fired.
      */
-    private fun decode(buf: ByteArray, n: Int): Boolean {
+    private fun decode(buf: ByteArray, n: Int): WakeEvent? {
         val dec = decoder
-        if (dec == null || !dec.acceptFrame(buf, n)) return false
+        if (dec == null || !dec.acceptFrame(buf, n)) return null
         idleReset.noteFlushed(clock())
         val words = parseResult(dec.finalResult())
         val transcript = render(words)
-        val outcome = WakeMatcher.evaluate(words, wakeWords)
-        when (val o = outcome) {
-            is WakeMatcher.Outcome.Match ->
-                events.onWake(WakeEvent(ID, o.id, transcript))
+        return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
+            is WakeMatcher.Outcome.Match -> WakeEvent(ID, o.id, transcript)
 
-            is WakeMatcher.Outcome.NearMiss ->
+            is WakeMatcher.Outcome.NearMiss -> {
                 events.onDiagnostic(ID, "near-miss [$transcript] rejected: ${o.reason}")
+                null
+            }
 
-            WakeMatcher.Outcome.None ->
+            WakeMatcher.Outcome.None -> {
                 if (transcript.isNotEmpty()) events.onDiagnostic(ID, "flushed final [$transcript]")
+                null
+            }
         }
-        return outcome is WakeMatcher.Outcome.Match
     }
 
     /**
