@@ -76,3 +76,13 @@ detekt {
 // rather than unhooked from `check`, so this holds however the plugin wires it.
 tasks.named("detekt") { enabled = false }
 tasks.check { dependsOn("detektMain", "detektTest") }
+
+// The plugin's variant detekt classpath is a convention mapped from the compile task (kotlinc.map { it.libraries }),
+// and that Provider drops the build dependencies of the libraries' artifact transforms, which Gradle deprecates
+// ("undeclared_artifact_transform_input"). Restate it as the FileCollection itself (as portal-assistant does).
+listOf("Debug", "Release", "DebugUnitTest").forEach { variant ->
+  tasks.matching { it.name == "detekt$variant" }.configureEach {
+    val kotlinc = tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compile${variant}Kotlin")
+    (this as dev.detekt.gradle.Detekt).classpath.setFrom(kotlinc.get().libraries)
+  }
+}
