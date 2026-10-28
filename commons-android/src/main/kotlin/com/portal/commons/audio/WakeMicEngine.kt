@@ -1,6 +1,7 @@
 package com.portal.commons.audio
 
 import android.content.Context
+import com.portal.commons.CapturePolicy
 import com.portal.commons.PcmCapture
 import com.portal.commons.PcmDevice
 import java.util.concurrent.TimeUnit
@@ -94,9 +95,11 @@ class WakeMicEngine internal constructor(
         postToMain = postToMain,
         log = config.log,
         threadName = "wake-capture",
-        rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
-        idleRebuildMs = PcmCapture.DEFAULT_IDLE_REBUILD_MS,
-        silenceWindowMs = PcmCapture.DEFAULT_SILENCE_WINDOW_MS,
+        policy = CapturePolicy(
+            rebuildAfterReadFailures = MIC_READ_FAILURES_BEFORE_REBUILD,
+            idleRebuildMs = CapturePolicy.DEFAULT_IDLE_REBUILD_MS,
+            silence = CapturePolicy.Silence(SILENCE_WINDOW_MS),
+        ),
         onClosed = { detectors.forEach { it.close() } },
     )
 
@@ -195,5 +198,13 @@ class WakeMicEngine internal constructor(
 
     companion object {
         const val MIC_READ_FAILURES_BEFORE_REBUILD = 40
+
+        /**
+         * The engine's silence window: this much audio of exact-zero samples ends capture as silenced, with no rebuild
+         * (a wake consumer retries on its own). Equal to the idle rebuild window, so no frames and only zeros both end
+         * capture within the same time. A consumer that paces retries reads it to know how long a silenced retry runs
+         * before it can fail.
+         */
+        const val SILENCE_WINDOW_MS = CapturePolicy.DEFAULT_IDLE_REBUILD_MS
     }
 }

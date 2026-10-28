@@ -106,18 +106,14 @@ class PcmCaptureTest {
     private val closes = CopyOnWriteArrayList<Unit>()
     private lateinit var capture: PcmCapture
 
-    private fun newCapture(
-        newDevice: () -> PcmDevice = { device },
-        silenceWindowMs: Long? = null,
-        rebuildAfterReadFailures: Int? = null,
-    ) = PcmCapture(
-        newDevice = newDevice,
-        postToMain = { posted.add(it) },
-        log = { logs.add(it) },
-        rebuildAfterReadFailures = rebuildAfterReadFailures,
-        silenceWindowMs = silenceWindowMs,
-        onClosed = { closes.add(Unit) },
-    ).also { capture = it }
+    private fun newCapture(newDevice: () -> PcmDevice = { device }, policy: CapturePolicy = CapturePolicy()) =
+        PcmCapture(
+            newDevice = newDevice,
+            postToMain = { posted.add(it) },
+            log = { logs.add(it) },
+            policy = policy,
+            onClosed = { closes.add(Unit) },
+        ).also { capture = it }
 
     private fun runPosted() {
         while (posted.isNotEmpty()) posted.removeAt(0).run()
@@ -229,7 +225,7 @@ class PcmCaptureTest {
     }
 
     @Test fun aFailedRebuildDuringCaptureDeliversExactlyOneDropped() {
-        newCapture(rebuildAfterReadFailures = 3).start(listener)
+        newCapture(policy = CapturePolicy(rebuildAfterReadFailures = 3)).start(listener)
         device.push()
         device.failOpens = 1
         device.failReads = true // the read-failure run ends in a rebuild whose open fails
@@ -241,7 +237,7 @@ class PcmCaptureTest {
     }
 
     @Test fun aFullSilenceWindowDeliversExactlyOneSilenced() {
-        newCapture(silenceWindowMs = 2_000L).start(listener)
+        newCapture(policy = CapturePolicy(silence = CapturePolicy.Silence(2_000L))).start(listener)
         repeat(19) { device.push() } // the device serves all-zero frames: 1.9 s of digital silence
         device.offer() // the 20th fills the 2 s window, and capture ends inside it
         awaitPostedThenRun()
@@ -252,7 +248,7 @@ class PcmCaptureTest {
     }
 
     @Test fun aPauseInsideTheSilenceDeliversNothingAndTheNextStartGetsAFullWindow() {
-        newCapture(silenceWindowMs = 2_000L).start(listener)
+        newCapture(policy = CapturePolicy(silence = CapturePolicy.Silence(2_000L))).start(listener)
         repeat(10) { device.push() }
         capture.pause()
         capture.start(listener)
@@ -303,7 +299,7 @@ class PcmCaptureTest {
                 holdStop.await()
             }
         }
-        newCapture(rebuildAfterReadFailures = 3).start(listener)
+        newCapture(policy = CapturePolicy(rebuildAfterReadFailures = 3)).start(listener)
         device.push()
         device.failOpens = 1
         device.failReads = true // the rebuild fails; the run is ending but has not yet reported its loss

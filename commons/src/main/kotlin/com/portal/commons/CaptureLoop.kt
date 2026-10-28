@@ -14,30 +14,30 @@ import java.util.concurrent.TimeUnit
  * frame out in [Action.Deliver]. A read of 0 is a normal non-blocking "no data yet" and polls again after
  * [READ_POLL_MS]; a read error (`< 0`) discards the partial frame and reads again after [READ_ERROR_BACKOFF_MS].
  *
- * **Rebuild.** With [rebuildAfterReadFailures] set, that many consecutive read errors rebuild the device. With
- * [idleRebuildMs] set, the device is *also* rebuilt when no full frame has been **delivered** for that long, catching a
- * stolen / half-dead mic that returns a clean 0, a sub-frame trickle, or partials interleaved with sub-threshold errors
- * (none of which the `< 0` path sees), so a consumer can't go silently deaf. The idle clock is monotonic, and restarts
- * when the device opens or reopens and at the first input after a delivered frame (the session reads again as soon as
- * the frame's callback returns, so a slow callback is not an idle mic). Both are transient mic-loss recovery (the
- * always-listening apps opt in). A rebuild that fails to reopen ends capture as [CaptureLoss.Dropped].
+ * **Rebuild.** With [CapturePolicy.rebuildAfterReadFailures] set, that many consecutive read errors rebuild the
+ * device. With [CapturePolicy.idleRebuildMs] set, the device is *also* rebuilt when no full frame has been
+ * **delivered** for that long, catching a stolen / half-dead mic that returns a clean 0, a sub-frame trickle, or
+ * partials interleaved with sub-threshold errors (none of which the `< 0` path sees), so a consumer can't go silently
+ * deaf. The idle clock is monotonic, and restarts when the device opens or reopens and at the first input after a
+ * delivered frame (the session reads again as soon as the frame's callback returns, so a slow callback is not an idle
+ * mic). Both are transient mic-loss recovery (the always-listening apps opt in). A rebuild that fails to reopen ends
+ * capture as [CaptureLoss.Dropped].
  *
- * **Silence.** With [silenceWindowMs] set, a capture that delivers that much audio of exact-zero samples in a row
- * ends as [CaptureLoss.Silenced], with no rebuild: a denied app-op's silence survives a reopen (and on gen1 the
- * reopen fails). With [rebuildOnSilence] also set, a full window first rebuilds the device, once per silence:
- * Portal+ gen1 silences a client's open input when its app leaves the foreground, and a reopen is live again. Only a
- * window that follows that rebuild with no sample heard in between ends capture. Real mics never produce exact zeros
- * for that long, even in a quiet room (checked on Portal+ gen1), so there is no tolerance band. The window is counted
- * in samples, not on a clock, and starts again at every open, every rebuild and every non-zero sample. A frame is
- * counted against it once delivered: [Action.Deliver.then] carries that decision.
+ * **Silence.** With [CapturePolicy.silence] set, a capture that delivers its [CapturePolicy.Silence.windowMs] of
+ * exact-zero samples in a row ends as [CaptureLoss.Silenced], with no rebuild: a denied app-op's silence survives a
+ * reopen (and on gen1 the reopen fails). With [CapturePolicy.Silence.rebuildFirst] also set, a full window first
+ * rebuilds the device, once per silence: Portal+ gen1 silences a client's open input when its app leaves the
+ * foreground, and a reopen is live again. Only a window that follows that rebuild with no sample heard in between ends
+ * capture. Real mics never produce exact zeros for that long, even in a quiet room (checked on Portal+ gen1), so there
+ * is no tolerance band. The window is counted in samples, not on a clock, and starts again at every open, every
+ * rebuild and every non-zero sample. A frame is counted against it once delivered: [Action.Deliver.then] carries that
+ * decision.
  */
-internal class CaptureLoop(
-    private val rebuildAfterReadFailures: Int? = null,
-    private val idleRebuildMs: Long? = null,
-    private val silenceWindowMs: Long? = null,
-    private val rebuildOnSilence: Boolean = false,
-    openedAtNs: Long,
-) {
+internal class CaptureLoop(policy: CapturePolicy, openedAtNs: Long) {
+    private val rebuildAfterReadFailures = policy.rebuildAfterReadFailures
+    private val idleRebuildMs = policy.idleRebuildMs
+    private val silence = policy.silence
+
     private val frame = ByteArray(PcmCaptureFormat.FRAME_BYTES)
     private var off = 0 // bytes assembled into the current frame so far
     private var readFails = 0
@@ -47,9 +47,8 @@ internal class CaptureLoop(
 
     // Consecutive exact-zero samples delivered, against the silence window counted in samples of audio.
     private var zeroSamples = 0L
-    private val silenceSamples = silenceWindowMs?.let { it * PcmCaptureFormat.SAMPLE_RATE / MS_PER_SECOND }
 
-    // With rebuildOnSilence: a silence window already rebuilt the device, and no sample has been heard since.
+    // With rebuildFirst: a silence window already rebuilt the device, and no sample has been heard since.
     private var silenceRebuilt = false
 
     /** The first action: always a [Action.Read] of a whole frame. */
@@ -94,15 +93,16 @@ internal class CaptureLoop(
 
     /** Counts the frame in [frame] against the silence window, and decides what follows its delivery. */
     private fun afterDelivery(): Action {
-        val window = silenceSamples ?: return next()
+        val rule = silence ?: return next()
+        val window = rule.windowMs * PcmCaptureFormat.SAMPLE_RATE / MS_PER_SECOND // in samples of audio
         val runBefore = zeroSamples
         zeroSamples = trailingZeroSamples(runBefore)
         if (zeroSamples < runBefore + FRAME_SAMPLES) silenceRebuilt = false // a sample heard: the stream is live
-        val reason = "digital silence for ${silenceWindowMs}ms"
+        val reason = "digital silence for ${rule.windowMs}ms"
         return when {
             zeroSamples < window -> next()
 
-            rebuildOnSilence && !silenceRebuilt -> {
+            rule.rebuildFirst && !silenceRebuilt -> {
                 silenceRebuilt = true
                 Action.Rebuild(reason)
             }

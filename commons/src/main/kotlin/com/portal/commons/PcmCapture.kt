@@ -7,7 +7,7 @@ import java.util.concurrent.locks.ReentrantLock
 /**
  * The module every app captures the mic through, one **capture request** at a time (see `GLOSSARY.md`): [start] begins
  * a request (or joins the open one), [pause] ends it, [close] ends the module. Every request captures on a fresh
- * device from [newDevice], under the capture policies passed here once.
+ * device from [newDevice], under the [policy] passed here once.
  *
  * What it guarantees a caller:
  * - **Current request only.** Each request's callbacks reach only the [Listener] it was started with, and only while
@@ -29,18 +29,12 @@ import java.util.concurrent.locks.ReentrantLock
  *
  * [start], [pause] and [close] are safe from any thread, including from inside a listener callback.
  */
-// The constructor is the whole configuration surface: the device factory, the poster and the session's capture
-// policies, passed by name. A parameter object would only move the same list.
-@Suppress("LongParameterList")
 class PcmCapture(
     private val newDevice: () -> PcmDevice,
     private val postToMain: (Runnable) -> Unit,
     private val log: (message: String) -> Unit = {},
     private val threadName: String = "pcm-capture",
-    private val rebuildAfterReadFailures: Int? = null,
-    private val idleRebuildMs: Long? = null,
-    private val silenceWindowMs: Long? = null,
-    private val rebuildOnSilence: Boolean = false,
+    private val policy: CapturePolicy = CapturePolicy(),
     private val onClosed: () -> Unit = {},
 ) {
     /** A consumer of one capture request. Every method defaults to a no-op. */
@@ -195,10 +189,7 @@ class PcmCapture(
         onLost = request::lost,
         log = log,
         threadName = threadName,
-        rebuildAfterReadFailures = rebuildAfterReadFailures,
-        idleRebuildMs = idleRebuildMs,
-        silenceWindowMs = silenceWindowMs,
-        rebuildOnSilence = rebuildOnSilence,
+        policy = policy,
     )
 
     /** Runs [block] on [request]'s listener under the callback lock, only while it is current and only while open. */
@@ -268,14 +259,5 @@ class PcmCapture(
     companion object {
         /** The one bound on stopping capture: [pause]'s stop, and the shared deadline of [close]'s waits. */
         const val STOP_DEADLINE_MS = PcmCaptureSession.STOP_DEADLINE_MS
-
-        /** Recommended idle rebuild window for an always-listening consumer. */
-        const val DEFAULT_IDLE_REBUILD_MS = PcmCaptureSession.DEFAULT_IDLE_REBUILD_MS
-
-        /**
-         * The silence window an always-listening consumer uses: this much audio of exact-zero samples ends capture as
-         * silenced. A consumer that paces retries reads it to know how long a silenced retry runs before it can fail.
-         */
-        const val DEFAULT_SILENCE_WINDOW_MS = PcmCaptureSession.DEFAULT_SILENCE_WINDOW_MS
     }
 }
