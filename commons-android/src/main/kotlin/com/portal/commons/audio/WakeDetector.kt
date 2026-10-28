@@ -11,10 +11,10 @@ import java.util.concurrent.atomic.AtomicReference
  * exactly one of these.
  *
  * **Threading contract.** [start] and [accept] run on the engine's capture thread at frame boundaries, never two at
- * once, even when a wedged capture session is rebuilt while the old capture thread is still
- * inside a call (two threads in one Decoder abort the process), so capture-thread state needs no locks. [close] runs at
- * most once and never during another call: from the thread closing the engine, or by the capture thread as it leaves a
- * call the engine's bounded close outlasted. [updateWakeWords] is safe from any thread.
+ * once, even when a wedged capture session is rebuilt while the old capture thread is still inside a call (two threads
+ * in one Decoder abort the process), so capture-thread state needs no locks. [close] runs at most once and never during
+ * another call: from the thread closing the engine, or by the capture thread as it leaves a call the engine's bounded
+ * close outlasted. [updateWakeWords] is safe from any thread.
  *
  * **The capture thread owns the wake decoder.** The loader only hands the model over ([delivered]); the next
  * frame adopts it, creating the wake decoder from the *current* wake words, then calls [onReady] (or
@@ -50,8 +50,8 @@ import java.util.concurrent.atomic.AtomicReference
  * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
  * rest of the backlog, the live frames queued behind it included.
  */
-// Seven separate inputs the engine wires, each its own seam (the loader, the wake words, three callbacks, the cooldown
-// length and the clock); bundling them would only move the list.
+// The seven inputs the engine wires in (the loader, the wake words, three callbacks, the cooldown length and the
+// clock); only the loader is a seam (ADR 0003), and bundling the callbacks would recreate the Events type it removed.
 @Suppress("LongParameterList")
 internal class WakeDetector(
     loader: VoskModelLoader,
