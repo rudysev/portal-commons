@@ -172,7 +172,7 @@ internal class RecordingCallbacks {
 
     val diagnostic: (String) -> Unit = { lines.add(it) }
 
-    /** A [VoskWakeDetector] that reports here, on a frozen idle-reset clock. */
-    fun detector(loader: VoskModelLoader, words: List<WakeWord>): VoskWakeDetector =
-        VoskWakeDetector(loader, words, onReady, onUnavailable, diagnostic, clock = { 0L })
+    /** A [WakeDetector] that reports here, on a frozen idle-reset clock. */
+    fun detector(loader: VoskModelLoader, words: List<WakeWord>): WakeDetector =
+        WakeDetector(loader, words, onReady, onUnavailable, diagnostic, clock = { 0L })
 }

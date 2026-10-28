@@ -13,7 +13,7 @@ import kotlin.concurrent.thread
  * the gate opens no window. Each test asserts only the end state — which decoder is live, and that everything else was
  * freed exactly once — so it holds however the detector hands the model over.
  */
-class VoskWakeDetectorRaceTest {
+class WakeDetectorRaceTest {
 
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()

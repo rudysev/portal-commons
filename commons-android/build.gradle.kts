@@ -57,10 +57,10 @@ tasks.check { dependsOn("lintRelease") }
 dependencies {
   // PcmDevice seam + PcmCaptureFormat. `api`: they appear in this module's public signatures.
   api(project(":commons"))
-  // On-device wake-word recognition (VoskWakeDetector/WakeMicEngine) — free, keyless, offline, no GMS.
+  // On-device wake-word recognition (WakeDetector/WakeMicEngine) — free, keyless, offline, no GMS.
   implementation("com.alphacephei:vosk-android:0.3.75")
   testImplementation("junit:junit:4.13.2")
-  // Real org.json for the VoskWakeDetector tests: main code calls it, the tests never reference it, so it is
+  // Real org.json for the WakeDetector tests: main code calls it, the tests never reference it, so it is
   // only needed on the test runtime classpath (in place of android.jar's throwing stubs).
   testRuntimeOnly("org.json:json:20240303")
 }

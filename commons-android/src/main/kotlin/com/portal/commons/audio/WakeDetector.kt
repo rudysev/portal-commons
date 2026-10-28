@@ -1,101 +1,176 @@
 package com.portal.commons.audio
 
-import android.content.Context
+import com.portal.commons.PcmCaptureFormat
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The **engine-agnostic wake-detection boundary**: everything downstream of "here is a 16 kHz mono 16-bit
- * PCM frame" that decides whether a wake phrase was spoken. [WakeMicEngine] owns the mic, the capture
- * thread, and the frame assembly; a [WakeDetector] owns *recognition* — model load, streaming inference,
- * and turning frames into wake events.
+ * The **wake detector** (see `GLOSSARY.md`), Vosk (free, keyless, offline): model handoff, the wake words stored before
+ * it is ready, and the pre-ready buffer + replay. Decoding — the Decoder, grammar, warm-up, result parsing, the
+ * [WakeMatcher] call and the idle reset that bounds Vosk's decode lattice — lives in the [WakeDecoder]. Native libvosk
+ * sits behind the [VoskModelLoader] / [VoskModel] / [VoskDecoder] seam; the mic lives in [WakeMicEngine], which holds
+ * exactly one of these.
  *
- * [WakeMicEngine] fans each captured frame to every configured detector so implementations can run in
- * parallel when benchmarking. Production apps typically configure one detector via [WakeDetectors].
+ * **Threading contract.** [start], [accept] and [updateWakeWords] run on the engine's capture thread at frame
+ * boundaries, never two at once, so capture-thread state needs no locks. [close] runs at most once and never during
+ * another call: from the thread closing the engine, or by the capture thread as it leaves a call the engine's bounded
+ * close outlasted. A wake exists only as [accept]'s return value.
  *
- * **Threading contract.** [start], [accept], and [updateWakeWords] are all called on the engine's single
- * **capture thread**, at frame boundaries — so an implementation may keep capture-thread-only mutable state
- * without locks, and must never be closed mid-[accept] (the engine defers a wake-set swap to a frame
- * boundary for exactly this reason). [close] is called at most once, never during another detector call: from the
- * thread calling [WakeMicEngine.close], or, when a detector call is still running (a stuck native call that outlasts
- * the bounded close, or a close from inside the wake callback), by the capture thread as it leaves that call.
- * The engine never runs two of these calls at once, even when it rebuilds a wedged capture session while the
- * old capture thread is still inside a detector call (two threads in one Vosk recognizer abort the process).
- * A wake exists only as the return value of [accept], so it arises on the capture thread inside a frame the engine
- * fed: never from [start], [updateWakeWords], [close] or a thread of its own.
- * Readiness is asynchronous and may be frame-driven: the Vosk detector signals [Events.onReady] (and
- * [Events.onUnavailable] for a failed first decoder build) on the capture thread at the first frame after its
- * model loads — so not while capture is paused — and [Events.onUnavailable] for a failed model load straight
- * from its model-load thread. [WakeMicEngine] forwards both to the consumer on the main thread (see
- * [WakeMicConfig]).
+ * **The capture thread owns the wake decoder.** The loader only hands the model over ([delivered]); the next
+ * frame adopts it, creating the wake decoder from the *current* wake words, then calls [onReady] (or
+ * [onUnavailable] if its first Decoder can't be built). A model-*load* failure calls [onUnavailable] straight from
+ * the loader. One thread touches decoders, so no locks. Readiness is frame-driven, so it never comes while capture
+ * is paused.
+ *
+ * **Per-frame policy** ([accept]): until a wake decoder exists, ring-buffer frames (so speech during init isn't
+ * lost); on adoption, replay them; then feed the wake decoder. **On (re)start** ([start]) the wake decoder is reset
+ * — which re-warms it — so the first frame after a resume isn't garbled.
+ *
+ * **Replay is spread over frames.** The pre-ready buffer becomes a backlog that each [accept] decodes at most
+ * [REPLAY_FRAMES_PER_ACCEPT] frames of, with every live frame queued behind it until it drains. Decoding a full
+ * buffer in one call (~38 ms a frame on gen2, so 1–2 s) held the capture thread inside the callback past a
+ * pause's stop join, and the stop force-released the mic. A [start] drops a backlog left by the previous capture.
+ *
+ * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
+ * rest of the backlog, the live frames queued behind it included.
+ * A match is [accept]'s return value; the wake decoder's diagnostics go out through [diagnostic].
+ *
+ * Readiness, unavailability and diagnostics are plain lambdas, as in the [WakeDecoder].
  */
-interface WakeDetector {
+internal class WakeDetector(
+    loader: VoskModelLoader,
+    initialWakeWords: List<WakeWord>,
+    private val onReady: () -> Unit,
+    private val onUnavailable: () -> Unit,
+    private val diagnostic: (String) -> Unit,
+    // Monotonic milliseconds, for the idle-reset clock (a wall-clock jump could force a mid-decode reset).
+    // Injected so tests drive time.
+    private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
+) {
 
-    /** Stable short id for logs, e.g. `"vosk"`. */
-    val id: String
+    // The loader → capture-thread handoff: set by the loader callback, taken by the next frame (or freed by
+    // close()). Atomic so a delivery racing close() frees the model exactly once.
+    private val delivered = AtomicReference<VoskModel?>(null)
 
-    /**
-     * (Re)entering capture: reset internal recognition state so the first frame after a fresh start /
-     * handoff-reclaim / device rebuild isn't garbled. Called on the capture thread from [WakeMicEngine]'s
-     * `onStarted`.
-     */
-    fun start()
+    @Volatile private var closed = false
+
+    // Capture-thread state. close() also touches it, but only after capture stops, under the engine's lock.
+    private var wakeDecoder: WakeDecoder? = null // non-null ⇔ ready
+
+    // The wake set stored until the wake decoder exists; adoption builds its first Decoder from it.
+    private var wakeWords: List<WakeWord> = initialWakeWords
+
+    private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
+
+    // Replay frames not yet decoded, then the live frames queued behind them. Empty once replay has caught up.
+    private val backlog = ArrayDeque<ByteArray>()
+
+    init {
+        try {
+            loader.load(::onModelDelivered, onUnavailable)
+        } catch (
+            // Throwable, not Exception: native init fails with Errors too (UnsatisfiedLinkError from libvosk).
+            @Suppress("SwallowedException", "TooGenericExceptionCaught")
+            t: Throwable,
+        ) {
+            // The throwable is intentionally swallowed: don't let a model-load / native-init failure crash the
+            // service. By contract any init failure is surfaced as onUnavailable, which the engine's consumer logs.
+            onUnavailable()
+        }
+    }
+
+    /** Loader callback (any thread): hand the model to the capture thread, or free it if we're already closed. */
+    private fun onModelDelivered(m: VoskModel) {
+        if (closed) {
+            runCatching { m.close() }
+            return
+        }
+        delivered.set(m)
+        // close() landed between the check and the set: whichever of us takes it back frees it.
+        if (closed && delivered.compareAndSet(m, null)) runCatching { m.close() }
+    }
+
+    /** (Re)entering capture: drop the previous capture's backlog and reset the wake decoder. */
+    fun start() {
+        backlog.clear() // audio from before the pause
+        wakeDecoder?.reset()
+    }
 
     /**
      * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]) and return the wake it completed, or null for
-     * none. Called on the capture thread. At most one wake per call: a detector that decodes several buffered frames
-     * in one call stops at its first wake and decodes nothing after it within that call. An implementation that isn't
-     * ready yet should buffer or drop internally; the engine may skip frames, so a detector must not assume it hears
-     * every one.
+     * none. At most one wake per call. The engine may skip frames, so this never assumes it hears every one.
      */
-    fun accept(buf: ByteArray, n: Int): WakeEvent?
-
-    /**
-     * Hot-swap the active wake set without tearing down capture. Called on the capture thread at a frame
-     * boundary. Detectors that cannot rebuild grammar in place may no-op.
-     */
-    fun updateWakeWords(words: List<WakeWord>)
-
-    /**
-     * Full teardown: release the model/native resources. Called once, never during another detector call: from the
-     * thread closing the engine, or by the capture thread as it leaves a call the engine's bounded close outlasted.
-     */
-    fun close()
-
-    /** Dependencies supplied when the engine builds a detector. */
-    interface Host {
-        val context: Context
-        val wakeWords: List<WakeWord>
-        val events: Events
+    fun accept(buf: ByteArray, n: Int): WakeEvent? {
+        val wd = wakeDecoder ?: adoptDeliveredModel()
+        if (wd == null) {
+            preReadyBuffer.add(buf, n)
+            return null
+        }
+        return if (backlog.isEmpty()) {
+            wd.accept(buf, n)
+        } else {
+            backlog.addLast(buf.copyOf(n))
+            decodeBacklog(wd)
+        }
     }
 
     /**
-     * How a detector reports back to [WakeMicEngine], besides the wakes [accept] returns. Callbacks carry the detector
-     * id; the engine prefixes log lines with it. [onReady] and [onUnavailable] are invoked on the capture thread or a
-     * detector's own model-load thread — [WakeMicEngine] re-delivers those two to the consumer on the main thread
-     * (see [WakeMicConfig]).
+     * Swap to a new wake set **without reloading the model** ([WakeDecoder.updateWakeWords]). Runs on the capture
+     * thread at a frame boundary, so a Decoder is never closed mid-[accept]. Before the wake decoder exists, just
+     * store the set — adoption builds from it.
      */
-    interface Events {
-        /**
-         * The detector can accept audio. May be frame-driven: Vosk calls it on the **capture thread** at the
-         * first frame after its model loads, once the first decoder is built and warmed.
-         */
-        fun onReady(detectorId: String)
-
-        /**
-         * The detector's model is missing/unusable — it will never fire. Vosk calls it on its **model-load
-         * thread** when the load fails, or on the **capture thread** (frame-driven) when the first decoder
-         * build fails.
-         */
-        fun onUnavailable(detectorId: String)
-
-        /**
-         * A tuning-relevant non-fire. The engine logs it prefixed with the detector [detectorId] so parallel
-         * detectors are distinguishable in `debug.txt`.
-         */
-        fun onDiagnostic(detectorId: String, message: String)
+    fun updateWakeWords(words: List<WakeWord>) {
+        val wd = wakeDecoder
+        if (wd == null) wakeWords = words else wd.updateWakeWords(words)
     }
 
-    /** Builds a [WakeDetector] once the engine has wired up its [Host]. */
-    fun interface Factory {
-        fun create(host: Host): WakeDetector
+    /** Full teardown: frees the wake decoder, and the model if it was delivered but never adopted. */
+    fun close() {
+        closed = true
+        delivered.getAndSet(null)?.let { runCatching { it.close() } }
+        backlog.clear()
+        wakeDecoder?.close()
+        wakeDecoder = null
+    }
+
+    /**
+     * Take a model the loader delivered: create the wake decoder, signal readiness and move the pre-ready buffer into
+     * the backlog. Null when there is no model yet, or its first Decoder build failed (unavailable).
+     */
+    private fun adoptDeliveredModel(): WakeDecoder? {
+        val m = delivered.getAndSet(null) ?: return null
+        val wd = WakeDecoder.create(m, wakeWords, diagnostic, clock = clock)
+        if (wd == null) {
+            onUnavailable()
+        } else {
+            wakeDecoder = wd
+            onReady()
+            val buffered = preReadyBuffer.drain()
+            if (buffered.isNotEmpty()) diagnostic("flushing ${buffered.size} pre-ready frame(s)")
+            backlog.addAll(buffered)
+        }
+        return wd
+    }
+
+    /**
+     * Decode up to [REPLAY_FRAMES_PER_ACCEPT] backlog frames in order, returning the first wake. A wake drops the rest:
+     * it was buffered before the wake, so it is never decoded after it.
+     */
+    private fun decodeBacklog(wd: WakeDecoder): WakeEvent? {
+        val wake = generateSequence { backlog.removeFirstOrNull() }
+            .take(REPLAY_FRAMES_PER_ACCEPT)
+            .firstNotNullOfOrNull { wd.accept(it, it.size) }
+        if (wake != null) backlog.clear()
+        return wake
+    }
+
+    companion object {
+        private val PRE_READY_MAX_FRAMES = 8_000 / PcmCaptureFormat.FRAME_MS
+
+        /**
+         * Backlog frames one [accept] decodes. About 115 ms of decoding on gen2, well inside a stop's join, and the
+         * backlog shrinks by two frames for each live one, so a full pre-ready buffer catches up in about 4 s.
+         */
+        const val REPLAY_FRAMES_PER_ACCEPT = 3
     }
 }

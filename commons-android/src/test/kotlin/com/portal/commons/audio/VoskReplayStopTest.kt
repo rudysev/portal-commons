@@ -1,6 +1,5 @@
 package com.portal.commons.audio
 
-import android.content.ContextWrapper
 import com.portal.commons.PcmDevice
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -51,29 +50,18 @@ class VoskReplayStopTest {
     }
 
     private val logs = CopyOnWriteArrayList<String>()
-    private val callbacks = RecordingCallbacks()
     private val loader = FakeVoskLoader()
     private val device = PermitDevice()
     private val engine = WakeMicEngine(
-        ContextWrapper(null),
         WakeMicConfig(
             wakeWords = listOf(JARVIS),
-            detectors = listOf(
-                WakeDetector.Factory { host ->
-                    VoskWakeDetector(
-                        loader,
-                        host.wakeWords,
-                        callbacks.onReady,
-                        callbacks.onUnavailable,
-                        callbacks.diagnostic,
-                    )
-                },
-            ),
+            model = WakeModel.Bundled,
             onWake = {},
             log = { logs.add(it) },
         ),
         newDevice = { device },
         postToMain = {},
+        newLoader = { loader },
     )
 
     @Test(timeout = 10_000)
@@ -89,7 +77,7 @@ class VoskReplayStopTest {
             },
         )
         device.permits.release(1) // the frame that adopts the model and starts the replay
-        while (callbacks.lines.none { "pre-ready" in it }) Thread.sleep(1)
+        while (logs.none { "pre-ready" in it }) Thread.sleep(1)
 
         engine.pause()
         engine.close()
