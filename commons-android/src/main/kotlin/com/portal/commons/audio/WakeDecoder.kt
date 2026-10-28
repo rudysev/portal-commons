@@ -49,7 +49,7 @@ internal class WakeDecoder private constructor(
     fun accept(buf: ByteArray, n: Int): WakeEvent? {
         maybeIdleReset()
         if (!decoder.acceptFrame(buf, n)) return null
-        flushedAtMs = clock()
+        latticeBounded()
         val words = parseResult(decoder.finalResult())
         val transcript = render(words)
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
@@ -80,14 +80,11 @@ internal class WakeDecoder private constructor(
             decoder = dec
             runCatching { old.close() }
         }
-        flushedAtMs = clock()
+        latticeBounded()
     }
 
     /** Reset and re-warm the Decoder and restart the idle-reset clock (a capture (re)start). */
-    fun reset() {
-        flush()
-        flushedAtMs = clock()
-    }
+    fun reset() = flush()
 
     /** Close the Decoder and the model. */
     fun close() {
@@ -95,15 +92,20 @@ internal class WakeDecoder private constructor(
         runCatching { model.close() }
     }
 
-    /**
-     * The idle reset check (rules in the class KDoc). The partial — a native call — is queried only once
-     * [QUIET_RESET_MS] has actually elapsed, not per frame.
-     */
     private fun maybeIdleReset() {
-        val now = clock()
-        val unflushedMs = now - flushedAtMs
-        val message = when {
-            unflushedMs < QUIET_RESET_MS -> return
+        val message = idleResetDue() ?: return
+        flush()
+        diagnostic(message)
+    }
+
+    /**
+     * The diagnostic for the idle reset due now (rules in the class KDoc), or null to keep the Decoder. The partial —
+     * a native call — is queried only once [QUIET_RESET_MS] has actually elapsed, not per frame.
+     */
+    private fun idleResetDue(): String? {
+        val unflushedMs = clock() - flushedAtMs
+        return when {
+            unflushedMs < QUIET_RESET_MS -> null
 
             // Any non-empty partial defers — even a bare "[unk]": the decoder may hypothesize [unk] while a real
             // "hey" is still settling. FORCE_RESET_MS caps how long that deferral can hold the reset off.
@@ -111,11 +113,13 @@ internal class WakeDecoder private constructor(
 
             unflushedMs >= FORCE_RESET_MS -> "idle reset forced mid-decode (bounding Vosk lattice)"
 
-            else -> return
+            else -> null
         }
-        flush()
-        flushedAtMs = now
-        diagnostic(message)
+    }
+
+    /** The lattice was just bounded (a reset, a new Decoder or an endpoint): restart the idle-reset clock. */
+    private fun latticeBounded() {
+        flushedAtMs = clock()
     }
 
     /**
@@ -126,10 +130,14 @@ internal class WakeDecoder private constructor(
     private fun isMidUtterance(): Boolean =
         runCatching { parsePartialText(decoder.partialResult()) }.getOrDefault("").isNotEmpty()
 
-    /** Drop any partial decode state, then re-warm — so stale audio doesn't linger into the next utterance. */
+    /**
+     * Drop any partial decode state, then re-warm — so stale audio doesn't linger into the next utterance — and
+     * restart the idle-reset clock.
+     */
     private fun flush() {
         runCatching { decoder.reset() }
         warmUp(decoder)
+        latticeBounded()
     }
 
     companion object {
