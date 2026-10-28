@@ -6,9 +6,17 @@ Shared mic capture and on-device wake-word detection for the Portal wake/voice a
 
 ### Wake detection
 
+**Wake model**:
+The Vosk acoustic model the **Decoders** are built from: either bundled in the APK or already unpacked on disk.
+_Avoid_: model dir (only one of the two sources is a directory the consumer supplies)
+
 **Decoder**:
 Vosk's streaming speech recognizer, built for one grammar, that turns audio frames into partial and final decodes.
 _Avoid_: recognizer (overloaded with the Vosk class and the old wrapper)
+
+**Wake detector**:
+Turns captured frames into wakes once the **wake model** has loaded: it adopts the model when it arrives, holds the **pre-ready buffer** until then and replays it afterwards, and feeds every frame to the **wake decoder**.
+_Avoid_: detector engine, recognizer
 
 **Wake decoder**:
 One **Decoder** at a time for the current wake words, and the judgement of each decode it finalizes as a wake, a near-miss or nothing. It replaces its Decoder when the wake words change, keeping the old one if the new one can't be built, and bounds the **lattice** with the **idle reset**.
@@ -23,7 +31,7 @@ A backstop reset of the decoder that bounds the lattice when no natural endpoint
 _Avoid_: periodic reset, lattice flush
 
 **Handoff cooldown**:
-The single window after any wake fires during which the engine feeds no frames to any detector, so no wake of any wake id arises, covering the gap until capture pauses for the handoff.
+The single window after any wake fires during which the engine feeds no frames to the **wake detector**, so no wake of any wake id arises, covering the gap until capture pauses for the handoff.
 _Avoid_: fire cooldown, de-dupe window
 
 **Pre-ready buffer**:
