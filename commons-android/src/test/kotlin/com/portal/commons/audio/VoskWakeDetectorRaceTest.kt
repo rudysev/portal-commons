@@ -17,9 +17,9 @@ class VoskWakeDetectorRaceTest {
 
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()
-    private val events = RecordingEvents()
+    private val callbacks = RecordingCallbacks()
 
-    private fun detector() = VoskWakeDetector(loader, listOf(JARVIS), events, clock = { 0L })
+    private fun detector() = callbacks.detector(loader, listOf(JARVIS))
 
     /**
      * Deliver the model on a `wake-model-load` thread; [during] runs while that delivery is (or would be) mid-build.
@@ -52,7 +52,7 @@ class VoskWakeDetectorRaceTest {
 
         assertEquals(1, model.closeCount)
         assertTrue(model.decoders.all { it.closed })
-        assertTrue("no ready after close", "ready" !in events.lines)
+        assertTrue("no ready after close", "ready" !in callbacks.lines)
     }
 
     @Test fun closeAfterDeliveryBeforeAnyFrameFreesEverythingOnce() {
@@ -71,6 +71,6 @@ class VoskWakeDetectorRaceTest {
 
         assertEquals(1, model.closeCount)
         assertTrue(model.decoders.isEmpty())
-        assertEquals(emptyList<String>(), events.lines)
+        assertEquals(emptyList<String>(), callbacks.lines)
     }
 }
