@@ -29,9 +29,9 @@ All package `com.portal.commons`.
 | Class | Purpose |
 |---|---|
 | `AudioRecordPcmDevice` | The shared `AudioRecord`-backed `PcmDevice` (VOICE_RECOGNITION, 16 kHz mono, no effects — the proven Portal capture config). Package `com.portal.commons.audio`. |
-| `WakeMicEngine` | Mic + capture thread; feeds PCM frames to its one **wake detector** (Vosk), and owns the **handoff cooldown** (one window after a wake: the wake detector is fed no frames, so no further wake arises; `wakeHandoffCooldownMs`). Consumer wiring via `WakeMicConfig` (`WakeEvent(wakeId, transcript)`, `onReady()` / `onUnavailable()`). `start()` / `pause()` / `close()`: see below. |
+| `WakeMicEngine` | Mic + capture thread; feeds PCM frames to its one **wake detector** (Vosk) on one injected monotonic clock, and delivers the wakes it returns; the **handoff cooldown** after a wake is the wake detector's. Consumer wiring via `WakeMicConfig` (`WakeEvent(wakeId, transcript)`, `onReady()` / `onUnavailable()`). `start()` / `pause()` / `close()`: see below. |
 | `WakeModel` | The **wake model** `WakeMicConfig.model` names: `WakeModel.Bundled` (the APK's `assets/model-en-us`, unpacked to filesDir; portal-wake) or `WakeModel.Unpacked(dir)` (an already-unpacked model on disk, e.g. downloaded at runtime; portal-assistant on gen2). |
-| Wake detector (`internal`) | Model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), idle-reset, and the `WakeMatcher` call. Native libvosk sits behind an internal seam, so the policy and the engine are JVM-tested over fakes. |
+| Wake detector (`internal`) | Model load, grammar building + hot-swap, warm-up, pre-ready buffering + replay (stopping at the first replayed wake), the **handoff cooldown** (one window after a wake in which every frame is ignored, so no further wake arises; `wakeHandoffCooldownMs`), idle-reset, and the `WakeMatcher` call. Native libvosk sits behind an internal seam, so the policy and the engine are JVM-tested over fakes. |
 
 ### Wake mic engine lifecycle
 

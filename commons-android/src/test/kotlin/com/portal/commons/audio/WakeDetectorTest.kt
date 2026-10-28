@@ -23,9 +23,10 @@ class WakeDetectorTest {
     private val loader = FakeVoskLoader()
     private val model = FakeVoskModel()
     private val callbacks = RecordingCallbacks()
+    private var nowMs = 0L
 
     private fun detector(words: List<WakeWord> = listOf(JARVIS), loader: VoskModelLoader = this.loader) =
-        callbacks.detector(loader, words)
+        callbacks.detector(loader, words, clock = { nowMs }, handoffCooldownMs = COOLDOWN_MS)
 
     /** A detector whose model has loaded and which has been started, with the callback log cleared. */
     private fun readyDetector(words: List<WakeWord> = listOf(JARVIS)): WakeDetector = detector(words).also {
@@ -36,9 +37,9 @@ class WakeDetectorTest {
     }
 
     /** Feed one finalizing frame that decodes [json]; returns the wake [WakeDetector.accept] returned, if any. */
-    private fun WakeDetector.decode(json: String): WakeEvent? {
+    private fun WakeDetector.decode(json: String, tag: Int = 3): WakeEvent? {
         model.finals.add(json)
-        return accept(frame(3, endpoint = true), FRAME)
+        return accept(frame(tag, endpoint = true), FRAME)
     }
 
     // ---- one wake end to end ------------------------------------------------------------------------
@@ -101,6 +102,66 @@ class WakeDetectorTest {
         assertEquals(ALEXA_GRAMMAR, model.live.grammar)
         assertEquals(listOf(2), model.live.fedTags())
         assertEquals(listOf("wake set changed → rebuilding grammar (1 word(s))"), callbacks.lines)
+    }
+
+    // ---- handoff cooldown -----------------------------------------------------------------------------
+
+    @Test fun noFrameReachesTheWakeDecoderUntilTheHandoffCooldownElapses() {
+        val d = readyDetector()
+        d.decode(HEY_JARVIS_CONFIDENT, tag = 2)
+        nowMs = 500L
+        assertNull(d.decode(HEY_JARVIS_CONFIDENT, tag = 3))
+        nowMs = COOLDOWN_MS - 1
+        d.accept(frame(4), FRAME)
+        nowMs = COOLDOWN_MS
+        d.accept(frame(5), FRAME)
+
+        assertEquals(listOf(TAG_PRIME, 2, 5), model.live.fedTags())
+    }
+
+    @Test fun aWakeExactlyWhenTheCooldownElapsesIsReturnedAndOpensAFreshWindow() {
+        val d = readyDetector()
+        d.decode(HEY_JARVIS_CONFIDENT, tag = 2)
+        nowMs = COOLDOWN_MS
+        val second = d.decode(HEY_JARVIS_CONFIDENT, tag = 3)
+        nowMs = 2 * COOLDOWN_MS - 1
+        d.accept(frame(4), FRAME)
+        nowMs = 2 * COOLDOWN_MS
+        d.accept(frame(5), FRAME)
+
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), second)
+        assertEquals(listOf(TAG_PRIME, 2, 3, 5), model.live.fedTags())
+    }
+
+    @Test fun startClosesTheCooldown() {
+        val d = readyDetector()
+        d.decode(HEY_JARVIS_CONFIDENT, tag = 2)
+        nowMs = 500L
+        d.start()
+
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT, tag = 3))
+        assertEquals(listOf(TAG_PRIME, 2, 3), model.live.fedTags())
+    }
+
+    @Test fun aWakeWordUpdateIsAppliedDuringTheCooldown() {
+        val d = readyDetector()
+        d.decode(HEY_JARVIS_CONFIDENT, tag = 2)
+        val old = model.live
+        d.updateWakeWords(listOf(ALEXA))
+        nowMs = 500L
+        d.accept(frame(3), FRAME)
+
+        assertTrue(old.closed)
+        assertEquals(ALEXA_GRAMMAR, model.live.grammar)
+        assertEquals("the new Decoder hears nothing inside the window", emptyList<Int>(), model.live.fedTags())
+    }
+
+    @Test fun theCooldownClockAlsoDrivesTheIdleReset() {
+        val d = readyDetector()
+        nowMs = 25_000L // the wake decoder's quiet-reset threshold
+        d.accept(frame(2), FRAME)
+
+        assertEquals(listOf("idle reset (bounding Vosk lattice)"), callbacks.lines)
     }
 
     // ---- start ---------------------------------------------------------------------------------------
@@ -203,7 +264,8 @@ class WakeDetectorTest {
         model.finals.add(HEY_JARVIS_CONFIDENT)
         loader.complete(model)
         val replayed = d.accept(frame(5), FRAME)
-        val live = d.accept(frame(6), FRAME) // past the replay, live frames decode again
+        nowMs = COOLDOWN_MS
+        val live = d.accept(frame(6), FRAME) // past the replay (and the window it opened), live frames decode again
 
         assertEquals(wake("jarvis", "hey(97) jarvis(81)"), replayed)
         assertNull(live)
@@ -225,5 +287,6 @@ class WakeDetectorTest {
 
     private companion object {
         const val TAG_PRIME = 99
+        const val COOLDOWN_MS = 1_500L
     }
 }

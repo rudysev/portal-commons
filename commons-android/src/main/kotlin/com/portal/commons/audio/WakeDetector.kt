@@ -1,12 +1,11 @@
 package com.portal.commons.audio
 
 import com.portal.commons.PcmCaptureFormat
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The **wake detector** (see `GLOSSARY.md`), Vosk (free, keyless, offline): model handoff, the wake-word handoff, and
- * the pre-ready buffer + replay. Decoding — the Decoder, grammar, warm-up, result parsing, the
+ * The **wake detector** (see `GLOSSARY.md`), Vosk (free, keyless, offline): model handoff, the wake-word handoff, the
+ * handoff cooldown, and the pre-ready buffer + replay. Decoding — the Decoder, grammar, warm-up, result parsing, the
  * [WakeMatcher] call and the idle reset that bounds Vosk's decode lattice — lives in the [WakeDecoder]. Native libvosk
  * sits behind the [VoskModelLoader] / [VoskModel] / [VoskDecoder] seam; the mic lives in [WakeMicEngine], which holds
  * exactly one of these.
@@ -29,9 +28,19 @@ import java.util.concurrent.atomic.AtomicReference
  * adoption builds its first Decoder from; after, the wake decoder swaps its Decoder, keeping the old one and the old
  * wake words if the new one can't be built. Only the latest update counts.
  *
- * **Per-frame policy** ([accept]): until a wake decoder exists, ring-buffer frames (so speech during init isn't
- * lost); on adoption, replay them; then feed the wake decoder. **On (re)start** ([start]) the wake decoder is reset
- * — which re-warms it — so the first frame after a resume isn't garbled.
+ * **Per-frame policy** ([accept]): take a pending wake-word update; inside the handoff cooldown, stop there; until a
+ * wake decoder exists, ring-buffer frames (so speech during init isn't lost); on adoption, replay them; then feed the
+ * wake decoder. **On (re)start** ([start]) the wake decoder is reset — which re-warms it — so the first frame after a
+ * resume isn't garbled.
+ *
+ * **Owns the handoff cooldown** (see `GLOSSARY.md`): returning a wake opens one window of [handoffCooldownMs] on
+ * [clock]. Every frame inside it is ignored: not buffered, not queued behind a backlog, not decoded, so no wake of any
+ * wake id arises. This covers the ~1 frame between a match and capture actually pausing for the handoff. A frame at
+ * exactly the window's end is decoded again, and [start] closes the window. A pending wake-word update is still
+ * applied inside it.
+ *
+ * **One clock.** [clock] is the engine's monotonic clock (a wall-clock jump could hold the window open and leave the
+ * engine deaf, or force a mid-decode idle reset); it drives both the cooldown and the wake decoder's idle reset.
  *
  * **Replay is spread over frames.** The pre-ready buffer becomes a backlog that each [accept] decodes at most
  * [REPLAY_FRAMES_PER_ACCEPT] frames of, with every live frame queued behind it until it drains. Decoding a full
@@ -41,15 +50,18 @@ import java.util.concurrent.atomic.AtomicReference
  * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
  * rest of the backlog, the live frames queued behind it included.
  */
+// Seven separate inputs the engine wires, each its own seam (the loader, the wake words, three callbacks, the cooldown
+// length and the clock); bundling them would only move the list.
+@Suppress("LongParameterList")
 internal class WakeDetector(
     loader: VoskModelLoader,
     initialWakeWords: List<WakeWord>,
     private val onReady: () -> Unit,
     private val onUnavailable: () -> Unit,
     private val diagnostic: (String) -> Unit,
-    // Monotonic milliseconds, for the idle-reset clock (a wall-clock jump could force a mid-decode reset).
-    // Injected so tests drive time.
-    private val clock: () -> Long = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) },
+    private val handoffCooldownMs: Long,
+    // Monotonic milliseconds, injected by the engine (and by tests, to drive time).
+    private val clock: () -> Long,
 ) {
 
     // The loader → capture-thread handoff: set by the loader callback, taken by the next frame (or freed by
@@ -67,6 +79,9 @@ internal class WakeDetector(
 
     // The wake set until the wake decoder exists (which then owns it); adoption builds its first Decoder from it.
     private var wakeWords: List<WakeWord> = initialWakeWords
+
+    // The handoff cooldown is open while clock() is before this instant.
+    private var handoffCooldownUntilMs = Long.MIN_VALUE
 
     private val preReadyBuffer = PcmRingBuffer(PRE_READY_MAX_FRAMES)
 
@@ -98,29 +113,22 @@ internal class WakeDetector(
         if (closed && delivered.compareAndSet(m, null)) runCatching { m.close() }
     }
 
-    /** (Re)entering capture: drop the previous capture's backlog and reset the wake decoder. */
+    /** (Re)entering capture: close the handoff cooldown, drop the old backlog and reset the wake decoder. */
     fun start() {
+        handoffCooldownUntilMs = Long.MIN_VALUE
         backlog.clear() // audio from before the pause
         wakeDecoder?.reset()
     }
 
     /**
      * Feed one frame of 16 kHz mono 16-bit PCM ([n] bytes of [buf]) and return the wake it completed, or null for
-     * none. At most one wake per call. The engine may skip frames, so this never assumes it hears every one.
+     * none. At most one wake per call, and a wake opens the handoff cooldown. The engine may skip frames, so this never
+     * assumes it hears every one.
      */
     fun accept(buf: ByteArray, n: Int): WakeEvent? {
         applyPendingWakeWords()
-        val wd = wakeDecoder ?: adoptDeliveredModel()
-        if (wd == null) {
-            preReadyBuffer.add(buf, n)
-            return null
-        }
-        return if (backlog.isEmpty()) {
-            wd.accept(buf, n)
-        } else {
-            backlog.addLast(buf.copyOf(n))
-            decodeBacklog(wd)
-        }
+        if (clock() < handoffCooldownUntilMs) return null // inside the handoff cooldown: ignored
+        return decode(buf, n)?.also { handoffCooldownUntilMs = clock() + handoffCooldownMs }
     }
 
     /**
@@ -139,6 +147,21 @@ internal class WakeDetector(
         backlog.clear()
         wakeDecoder?.close()
         wakeDecoder = null
+    }
+
+    /** Buffer, queue or decode one frame outside the handoff cooldown; the wake it completed, if any. */
+    private fun decode(buf: ByteArray, n: Int): WakeEvent? {
+        val wd = wakeDecoder ?: adoptDeliveredModel()
+        if (wd == null) {
+            preReadyBuffer.add(buf, n)
+            return null
+        }
+        return if (backlog.isEmpty()) {
+            wd.accept(buf, n)
+        } else {
+            backlog.addLast(buf.copyOf(n))
+            decodeBacklog(wd)
+        }
     }
 
     /** Take the latest wake-word update, if any, and apply it (capture thread, at a frame boundary). */
