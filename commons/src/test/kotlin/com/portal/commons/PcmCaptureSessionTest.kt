@@ -316,7 +316,7 @@ class PcmCaptureSessionTest {
             onFrame = { _, _ -> frames.incrementAndGet() },
             onLost = losses::add,
             log = log,
-            rebuildAfterReadFailures = 3,
+            policy = CapturePolicy(rebuildAfterReadFailures = 3),
         )
 
         session.start()
@@ -512,7 +512,7 @@ class PcmCaptureSessionTest {
     fun aStopBetweenADeliveredFrameAndItsFollowUpCarriesOutNeither() {
         // The frame that fills the silence window is followed by a rebuild (rebuild on silence) or by the silenced
         // loss. A stop that lands while that frame is being delivered carries out neither: no reopen, no loss.
-        for (rebuildOnSilence in listOf(true, false)) {
+        for (rebuildFirst in listOf(true, false)) {
             val device = SilentDevice()
             val log = StopLog()
             val losses = Losses()
@@ -522,15 +522,17 @@ class PcmCaptureSessionTest {
                 onFrame = { _, _ -> session.stop() }, // a self-stop: it signals and returns
                 onLost = losses::add,
                 log = log,
-                silenceWindowMs = PcmCaptureFormat.FRAME_MS.toLong(), // the first frame fills the window
-                rebuildOnSilence = rebuildOnSilence,
+                policy = CapturePolicy(
+                    // The first frame fills the window.
+                    silence = CapturePolicy.Silence(PcmCaptureFormat.FRAME_MS.toLong(), rebuildFirst),
+                ),
             )
 
             session.start()
             await(log.stopped)
 
-            assertEquals("no rebuild (rebuildOnSilence=$rebuildOnSilence)", 1, device.openCount.get())
-            assertEquals("no loss (rebuildOnSilence=$rebuildOnSilence)", emptyList<CaptureLoss>(), losses.all)
+            assertEquals("no rebuild (rebuildFirst=$rebuildFirst)", 1, device.openCount.get())
+            assertEquals("no loss (rebuildFirst=$rebuildFirst)", emptyList<CaptureLoss>(), losses.all)
         }
     }
 

@@ -42,12 +42,11 @@ import kotlin.concurrent.withLock
  * **Single-use.** A session runs at most one capture: a second [start], or a [start] after [stop], is a logged
  * no-op. To capture again, build a fresh session.
  *
- * **Rebuild and silence.** [rebuildAfterReadFailures], [idleRebuildMs], [silenceWindowMs] and [rebuildOnSilence] are
- * the capture policies; [CaptureLoop] holds the rules they set, and this session carries out the rebuilds and losses
- * those rules decide. A rebuild is `stop` → `release` → `open` of the device.
+ * **Rebuild and silence.** [policy] sets the rules; [CaptureLoop] holds them, and this session carries out the rebuilds
+ * and losses those rules decide. A rebuild is `stop` → `release` → `open` of the device.
  */
-// The constructor is the whole configuration surface: the parameters after device/onFrame are optional callbacks or
-// policies with a default, and PcmCapture passes them by name. A parameter object would only move the same list.
+// The constructor is the whole configuration surface: after device/onFrame come optional callbacks, the thread name,
+// the policy (already one CapturePolicy) and a test timing, each with a default and passed by name.
 @Suppress("LongParameterList")
 internal class PcmCaptureSession(
     private val device: PcmDevice,
@@ -56,10 +55,7 @@ internal class PcmCaptureSession(
     private val onLost: (CaptureLoss) -> Unit = {},
     private val log: (message: String) -> Unit = {},
     private val threadName: String = "pcm-capture",
-    private val rebuildAfterReadFailures: Int? = null,
-    private val idleRebuildMs: Long? = null,
-    private val silenceWindowMs: Long? = null,
-    private val rebuildOnSilence: Boolean = false,
+    private val policy: CapturePolicy = CapturePolicy(),
     // Test timing, not policy.
     private val stopTimeoutMs: Long = STOP_DEADLINE_MS,
 ) {
@@ -172,13 +168,7 @@ internal class PcmCaptureSession(
             return
         }
         // Built before onStarted(), so the idle clock starts when the device opened.
-        val capture = CaptureLoop(
-            rebuildAfterReadFailures = rebuildAfterReadFailures,
-            idleRebuildMs = idleRebuildMs,
-            silenceWindowMs = silenceWindowMs,
-            rebuildOnSilence = rebuildOnSilence,
-            openedAtNs = System.nanoTime(),
-        )
+        val capture = CaptureLoop(policy, openedAtNs = System.nanoTime())
         log("pcm capture started")
         var loss: CaptureLoss? = null
         try {
@@ -267,16 +257,5 @@ internal class PcmCaptureSession(
 
         /** The part of [stop]'s deadline left for a force-release once the join gives up (at most half of it). */
         const val FORCE_RELEASE_GRACE_MS = 50L
-
-        // Recommended idleRebuildMs for an always-listening consumer: ~20× FRAME_MS, so healthy continuous
-        // capture never idles this long — only a stolen/half-dead mic does.
-        const val DEFAULT_IDLE_REBUILD_MS = 2_000L
-
-        /**
-         * The silence window an always-listening consumer uses: this much audio of exact-zero samples ends capture
-         * as silenced. Equal to [DEFAULT_IDLE_REBUILD_MS], so no frames and only zeros both end within the same time.
-         * A consumer that paces retries reads it to know how long a silenced retry runs before it can fail.
-         */
-        const val DEFAULT_SILENCE_WINDOW_MS = DEFAULT_IDLE_REBUILD_MS
     }
 }

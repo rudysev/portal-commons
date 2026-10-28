@@ -1,6 +1,7 @@
 package com.portal.commons
 
 import com.portal.commons.CaptureLoop.Action
+import com.portal.commons.CapturePolicy.Silence
 import com.portal.commons.audio.CaptureLoss
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -18,7 +19,7 @@ class CaptureLoopTest {
         // Each frame is exactly FRAME_BYTES even when the device dribbles bytes in small chunks, including a chunk
         // size that does not divide FRAME_BYTES (3200) evenly: every read asks for at most what the frame still needs.
         for (chunk in listOf(640, 999)) {
-            val loop = CaptureLoop(openedAtNs = 0)
+            val loop = CaptureLoop(CapturePolicy(), openedAtNs = 0)
             var action = loop.first()
             var reads = 0
             var served = 0
@@ -42,7 +43,7 @@ class CaptureLoopTest {
     fun idleZeroReturnsDoNotTripRebuild() {
         // A non-blocking read returning 0 (no data now) is normal, not a failure: it does not count toward
         // rebuildAfterReadFailures, so even a threshold of one read error never rebuilds. The loop polls again later.
-        val loop = CaptureLoop(rebuildAfterReadFailures = 1, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 1), openedAtNs = 0)
         loop.first()
         repeat(100) {
             assertEquals(Action.Read(FRAME, CaptureLoop.READ_POLL_MS), loop.onRead(ByteArray(0), 0, nowNs = 0))
@@ -54,7 +55,7 @@ class CaptureLoopTest {
 
     @Test
     fun rebuildsAfterConsecutiveReadFailures() {
-        val loop = CaptureLoop(rebuildAfterReadFailures = 3, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 3), openedAtNs = 0)
         loop.first()
         loop.onRead(ByteArray(640), 640, nowNs = 0) // a partial frame, which the first error discards
 
@@ -70,7 +71,7 @@ class CaptureLoopTest {
 
     @Test
     fun aSuccessfulReadRestartsTheReadFailureCount() {
-        val loop = CaptureLoop(rebuildAfterReadFailures = 2, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 2), openedAtNs = 0)
         loop.first()
         loop.onRead(ByteArray(0), -1, nowNs = 0)
         loop.onRead(ByteArray(640), 640, nowNs = 0)
@@ -84,7 +85,7 @@ class CaptureLoopTest {
 
     @Test
     fun aFailedRebuildIsLostAsDropped() {
-        val loop = CaptureLoop(rebuildAfterReadFailures = 1, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 1), openedAtNs = 0)
         loop.first()
         loop.onRead(ByteArray(0), -1, nowNs = 0)
 
@@ -98,7 +99,7 @@ class CaptureLoopTest {
     fun idleWatchdogRebuildsWhenLiveMicReturnsNoData() {
         // A live mic that returns 0 (no data) for idleRebuildMs, a stolen or half-dead slot that never errors, is
         // rebuilt by the idle watchdog, not counted as a read error.
-        val loop = CaptureLoop(rebuildAfterReadFailures = 1, idleRebuildMs = 50, openedAtNs = ms(10))
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 1, idleRebuildMs = 50), openedAtNs = ms(10))
         loop.first()
         assertEquals(Action.Read(FRAME, CaptureLoop.READ_POLL_MS), loop.onRead(ByteArray(0), 0, nowNs = ms(59)))
         assertEquals(Action.Rebuild("no frame for 50ms"), loop.onRead(ByteArray(0), 0, nowNs = ms(60)))
@@ -112,7 +113,7 @@ class CaptureLoopTest {
     fun idleWatchdogRebuildsWhenMicTricklesSubFrameBytes() {
         // The watchdog measures delivered frames, not reads: a half-dead mic that returns bytes on every read but never
         // enough to complete a frame still trips it.
-        val loop = CaptureLoop(rebuildAfterReadFailures = 1, idleRebuildMs = 150, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(rebuildAfterReadFailures = 1, idleRebuildMs = 150), openedAtNs = 0)
         loop.first()
         for (t in 0L until 150L step 5) {
             assertEquals(Action.Read(FRAME - 1 - (t / 5).toInt()), loop.onRead(ByteArray(1), 1, nowNs = ms(t)))
@@ -124,7 +125,7 @@ class CaptureLoopTest {
     fun aSlowFrameCallbackDoesNotTripTheIdleWatchdog() {
         // The idle clock restarts once the consumer has the frame: the session reads again as soon as the frame
         // callback returns, so a callback slower than idleRebuildMs is not a stalled mic.
-        val loop = CaptureLoop(idleRebuildMs = 50, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(idleRebuildMs = 50), openedAtNs = 0)
         loop.first()
         loop.onRead(ByteArray(FRAME), FRAME, nowNs = ms(10))
 
@@ -134,7 +135,7 @@ class CaptureLoopTest {
 
     @Test
     fun aWindowOfDigitalSilenceEndsCaptureAsSilenced() {
-        val loop = CaptureLoop(silenceWindowMs = SILENCE_WINDOW_MS, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(silence = Silence(SILENCE_WINDOW_MS)), openedAtNs = 0)
         loop.first()
 
         // 2 s of 16 kHz audio in 100 ms frames is 20 frames: the 20th is delivered, and then capture ends.
@@ -146,7 +147,7 @@ class CaptureLoopTest {
     fun oneNonZeroSampleRestartsTheSilenceWindow() {
         // Frame 20 opens with one non-zero sample, so it leaves 1,599 trailing zeros: the window (32,000 samples) is
         // full only after 20 more all-zero frames (1,599 + 20 × 1,600), on frame 40.
-        val loop = CaptureLoop(silenceWindowMs = SILENCE_WINDOW_MS, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(silence = Silence(SILENCE_WINDOW_MS)), openedAtNs = 0)
         loop.first()
         repeat(FRAMES_IN_WINDOW - 1) { loop.deliver(sample = 0) }
         assertEquals(Action.Read(FRAME), loop.deliver(sample = 1))
@@ -159,7 +160,7 @@ class CaptureLoopTest {
     fun aRebuildRestartsTheSilenceWindow() {
         // 10 silent frames, a stall the idle watchdog rebuilds, then silence on the rebuilt device: silenced only after
         // a full window there, 10 + 20 frames.
-        val loop = CaptureLoop(idleRebuildMs = 50, silenceWindowMs = SILENCE_WINDOW_MS, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(idleRebuildMs = 50, silence = Silence(SILENCE_WINDOW_MS)), openedAtNs = 0)
         loop.first()
         repeat(FRAMES_IN_WINDOW / 2) { loop.deliver(sample = 0) }
         loop.onRead(ByteArray(0), 0, nowNs = 0)
@@ -172,7 +173,7 @@ class CaptureLoopTest {
 
     @Test
     fun withoutASilenceWindowDigitalSilenceKeepsCapturing() {
-        val loop = CaptureLoop(openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(), openedAtNs = 0)
         loop.first()
 
         repeat(2 * FRAMES_IN_WINDOW) { assertEquals("never silenced", Action.Read(FRAME), loop.deliver(sample = 0)) }
@@ -181,7 +182,7 @@ class CaptureLoopTest {
     @Test
     fun withRebuildOnSilenceAWindowOfSilenceRebuildsAndCaptureGoesOn() {
         // A client the system silences mid-capture (Portal+ gen1 backgrounding the app), which a reopen brings back.
-        val loop = CaptureLoop(silenceWindowMs = SILENCE_WINDOW_MS, rebuildOnSilence = true, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(silence = Silence(SILENCE_WINDOW_MS, rebuildFirst = true)), openedAtNs = 0)
         loop.first()
         repeat(FRAMES_IN_WINDOW - 1) { loop.deliver(sample = 0) }
         assertEquals(SILENCE_REBUILD, loop.deliver(sample = 0))
@@ -192,7 +193,7 @@ class CaptureLoopTest {
 
     @Test
     fun withRebuildOnSilenceASilenceThatSurvivesTheRebuildEndsCaptureAsSilenced() {
-        val loop = CaptureLoop(silenceWindowMs = SILENCE_WINDOW_MS, rebuildOnSilence = true, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(silence = Silence(SILENCE_WINDOW_MS, rebuildFirst = true)), openedAtNs = 0)
         loop.first()
 
         // One window on the first open, one more on the rebuilt device, then the loss.
@@ -207,7 +208,7 @@ class CaptureLoopTest {
     fun withRebuildOnSilenceASoundAfterTheRebuildEarnsAnotherRebuild() {
         // A window of silence (rebuild 1), one sound on the rebuilt device, then silence: the sound means the reopen
         // worked, so the next window rebuilds again before a last window ends capture.
-        val loop = CaptureLoop(silenceWindowMs = SILENCE_WINDOW_MS, rebuildOnSilence = true, openedAtNs = 0)
+        val loop = CaptureLoop(CapturePolicy(silence = Silence(SILENCE_WINDOW_MS, rebuildFirst = true)), openedAtNs = 0)
         loop.first()
         repeat(FRAMES_IN_WINDOW - 1) { loop.deliver(sample = 0) }
         assertEquals(SILENCE_REBUILD, loop.deliver(sample = 0))
