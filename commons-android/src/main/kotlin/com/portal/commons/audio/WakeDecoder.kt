@@ -192,18 +192,22 @@ internal class WakeDecoder private constructor(
         }
 
         /**
-         * Vosk JSON grammar built from the wake phrases + their keywords + each word's declared lead (e.g.
-         * "hey"), plus an "[unk]" escape token. "[unk]" absorbs non-matching speech so the decoder doesn't force
-         * look-alikes onto a wake phrase; the per-phrase entries bias it toward a real wake — the single biggest
-         * accuracy win. Only the declared lead is added (not its [WakeMatcher.LEAD_ALIASES] mishearings), so the
-         * grammar stays identical to what a "hey jarvis" produced before — on-device recall is unaffected.
+         * Vosk JSON grammar built from the wake phrases + each word's declared lead (e.g. "hey"), plus an "[unk]"
+         * escape token. "[unk]" absorbs non-matching speech so the decoder doesn't force look-alikes onto a wake
+         * phrase; the per-phrase entries bias it toward a real wake — the single biggest accuracy win. Only the
+         * declared lead is added (not its [WakeMatcher.LEAD_ALIASES] mishearings).
+         *
+         * The bare keyword is an entry only for a word with no lead. For a word with a lead the matcher never
+         * fires on a bare keyword, and offering one let the decoder explain a quiet, unstressed "hey" as silence
+         * and decode `[jarvis]` alone, the commonest missed wake on device. Without it the decoder has to account
+         * for that audio as the lead (or "[unk]").
          */
         private fun buildGrammar(words: List<WakeWord>): String {
             val entries = LinkedHashSet<String>()
             words.forEach {
                 entries.add(it.phrase.lowercase())
-                entries.add(it.keyword.lowercase())
-                it.lead?.let { lead -> entries.add(lead.lowercase()) }
+                val lead = it.lead
+                if (lead == null) entries.add(it.keyword.lowercase()) else entries.add(lead.lowercase())
             }
             entries.add(WakeMatcher.UNK_TOKEN) // same token WakeMatcher's strict contamination gate rejects
             return entries.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }

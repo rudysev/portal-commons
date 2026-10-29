@@ -41,7 +41,7 @@ class WakeDetectorRaceTest {
         d.accept(frame(2), FRAME)
 
         val live = model.decoders.single { it.fed.isNotEmpty() }
-        assertEquals("""["hey alexa", "alexa", "hey", "[unk]"]""", live.grammar)
+        assertEquals(ALEXA_GRAMMAR, live.grammar)
         assertTrue("every other decoder freed", (model.decoders - live).all { it.closed })
     }
 

@@ -12,7 +12,7 @@ internal const val FRAME = PcmCaptureFormat.FRAME_BYTES
 internal val JARVIS = WakeWord.fromPhrase("hey jarvis", id = "jarvis", minConf = WakeMatcher.STRICT_MIN_CONF)!!
 internal val ALEXA = WakeWord.fromPhrase("hey alexa", id = "alexa", minConf = WakeMatcher.STRICT_MIN_CONF)!!
 
-internal const val ALEXA_GRAMMAR = """["hey alexa", "alexa", "hey", "[unk]"]"""
+internal const val ALEXA_GRAMMAR = """["hey alexa", "hey", "[unk]"]"""
 
 /** A final result that wakes [JARVIS]: "hey jarvis" with per-word confidence. */
 internal val HEY_JARVIS_CONFIDENT = """
