@@ -46,12 +46,13 @@ object WakeMatcher {
     const val CLEAN_PHRASE_MAX_WORDS = 3
 
     /**
-     * Confidence floor the preceding lead (e.g. "hey") must clear on a **strict** route. A real wake decodes
-     * its lead at 0.96–1.00 (see `TUNING.md`), so this is essentially free recall-wise, but it blocks a
+     * Confidence floor the preceding lead (e.g. "hey") must clear on a **strict** route. It blocks a
      * background-audio FP that assembles a short clean "hey jarvis" with an under-confident "hey" — observed
-     * live at 0.66 during a phone call held near the Portal. Lenient routes do not apply it (present-only, for recall).
+     * live at 0.66 during a phone call held near the Portal — so it stays above that. A quiet, unstressed "hey"
+     * on the Portal mic often decodes at 0.7x in a genuine wake, so it sits just above the FP (see `TUNING.md`).
+     * Lenient routes do not apply it (present-only, for recall).
      */
-    const val LEAD_MIN_CONF = 0.80
+    const val LEAD_MIN_CONF = 0.70
 
     /**
      * Decoded variants accepted for a declared lead word (open recognition mishears it). The lead itself

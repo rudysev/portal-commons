@@ -46,7 +46,7 @@ class WakeDecoderTest {
 
     @Test fun textOnlyDecodeHasNoConfidence_soOnlyALenientRouteFires() {
         assertNull(ready().decode("""{"text":"hey jarvis"}"""))
-        assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.8 floor"), diagnostics)
+        assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.7 floor"), diagnostics)
     }
 
     @Test fun textOnlyDecodeFiresALenientRoute() {
@@ -224,10 +224,10 @@ class WakeDecoderTest {
 
     // ---- grammar ------------------------------------------------------------------------------------
 
-    @Test fun grammarListsEachPhraseKeywordAndLeadThenUnk() {
+    @Test fun grammarListsEachPhraseAndLeadThenUnk_andABareKeywordOnlyForALeadlessWord() {
         ready(listOf(JARVIS, ALEXA, COMPUTER))
         assertEquals(
-            """["hey jarvis", "jarvis", "hey", "hey alexa", "alexa", "computer", "[unk]"]""",
+            """["hey jarvis", "hey", "hey alexa", "computer", "[unk]"]""",
             model.decoders.single().grammar,
         )
     }

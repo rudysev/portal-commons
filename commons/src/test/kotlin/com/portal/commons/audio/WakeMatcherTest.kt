@@ -140,14 +140,19 @@ class WakeMatcherTest {
 
     @Test fun strictWord_weakHey_doesNotMatch() {
         // A short clean "hey jarvis", jarvis over its floor (0.95) but "hey" under-confident at 0.66 — the
-        // signature of background audio. A real wake decodes "hey" at 0.96–1.00, so the LEAD_MIN_CONF floor
-        // rejects this with no recall cost. (No "[unk]" here, so the contamination gate isn't what's tested.)
+        // signature of background audio, observed live during a phone call. The LEAD_MIN_CONF floor sits above it,
+        // so it is rejected. (No "[unk]" here, so the contamination gate isn't what's tested.)
         assertNull(WakeMatcher.match(rec("hey" to 0.66, "jarvis" to 0.95), words))
     }
 
     @Test fun strictWord_confidentHey_matches() {
         // A genuine bare wake — no "[unk]", confident "hey" (≥ LEAD_MIN_CONF), keyword over floor — must fire.
         assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.96, "jarvis" to 0.95), words))
+    }
+
+    @Test fun strictWord_quietHey_matches() {
+        // A genuine wake whose quiet, unstressed "hey" decodes at 0.7x on the Portal mic: over the floor, so it fires.
+        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.72, "jarvis" to 0.95), words))
     }
 
     @Test fun strictWord_contaminatedDecode_doesNotMatch() {
