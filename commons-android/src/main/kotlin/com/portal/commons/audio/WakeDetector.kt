@@ -1,6 +1,7 @@
 package com.portal.commons.audio
 
 import com.portal.commons.PcmCaptureFormat
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -77,6 +78,9 @@ internal class WakeDetector(
 
     @Volatile private var closed = false
 
+    // Set by markMiss on any thread, taken on the capture thread at the next accept.
+    private val missMarked = AtomicBoolean(false)
+
     // Capture-thread state. close() also touches it, but only after capture stops, under the engine's lock.
     private var wakeDecoder: WakeDecoder? = null // non-null ⇔ ready
 
@@ -130,6 +134,7 @@ internal class WakeDetector(
      */
     fun accept(buf: ByteArray, n: Int): WakeEvent? {
         applyPendingWakeWords()
+        if (missMarked.getAndSet(false)) wakeDecoder?.markMiss() ?: diagnostic("miss mark ignored (not ready)")
         if (clock() < handoffCooldownUntilMs) return null // inside the handoff cooldown: ignored
         return decode(buf, n)?.also { handoffCooldownUntilMs = clock() + handoffCooldownMs }
     }
@@ -141,6 +146,14 @@ internal class WakeDetector(
      */
     fun updateWakeWords(words: List<WakeWord>) {
         pendingWakeWords.set(words)
+    }
+
+    /**
+     * Save the audio behind a wake that didn't fire ([WakeDecoder.markMiss]), from any thread. Taken on the capture
+     * thread at the next [accept], before that frame is decoded, so the window is never read mid-frame.
+     */
+    fun markMiss() {
+        missMarked.set(true)
     }
 
     /** Full teardown: frees the wake decoder, and the model if it was delivered but never adopted. */

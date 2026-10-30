@@ -23,6 +23,12 @@ class PcmWindowTest {
         assertArrayEquals(bytes(3, 4, 5, 6), w.snapshot())
     }
 
+    @Test fun aBoundedSnapshotKeepsOnlyTheNewestBytes() {
+        w.add(bytes(1, 2, 3), 3)
+        assertArrayEquals(bytes(2, 3), w.snapshot(2))
+        assertArrayEquals(bytes(1, 2, 3), w.snapshot(9))
+    }
+
     @Test fun clearEmptiesIt() {
         w.add(bytes(1, 2, 3), 3)
         w.clear()

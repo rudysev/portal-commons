@@ -144,6 +144,13 @@ class WakeMicEngine internal constructor(
     fun updateWakeWords(words: List<WakeWord>) = detector.updateWakeWords(words)
 
     /**
+     * Save the last [WakeAudit.MISS_MS] of audio as a missed wake, from any thread: someone said the phrase and it
+     * didn't fire. Taken at the next frame; logged and ignored with no [WakeMicConfig.audit], or while paused (until
+     * capture resumes, by when the window holds only new audio).
+     */
+    fun markMiss() = detector.markMiss()
+
+    /**
      * Ends the capture request and yields the mic slot. Reports no capture loss, and cancels one already posted but
      * not yet delivered. A harmless no-op after a loss; a logged no-op after [close].
      */

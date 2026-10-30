@@ -20,7 +20,8 @@ import java.util.concurrent.TimeUnit
  *
  * **Capped per kind.** Near-misses arrive every minute or two and wakes far less often, so one shared cap would let a
  * talkative day crowd out the wake clips that settle a question. Counts are seeded from [dir], so a restart resumes
- * the cap; a kind at its cap is recounted before refusing, so clips pulled off the device free their room.
+ * the cap; a kind at its cap is recounted before refusing, so clips pulled off the device free their room. A miss is
+ * 12× the size of the others, so it is capped at [MISS_CAP].
  */
 class WakeClipRecorder(
     private val dir: File,
@@ -97,9 +98,10 @@ class WakeClipRecorder(
     }
 
     private fun write(c: Clip) {
-        if ((counts[c.kind] ?: 0) >= capPerKind) recount(c.kind)
-        if ((counts[c.kind] ?: 0) >= capPerKind) {
-            if (capLogged.add(c.kind)) log("wake clips: cap $capPerKind reached for '${c.kind.prefix}', skipping")
+        val cap = if (c.kind == WakeAudit.Clip.MISS) minOf(capPerKind, MISS_CAP) else capPerKind
+        if ((counts[c.kind] ?: 0) >= cap) recount(c.kind)
+        if ((counts[c.kind] ?: 0) >= cap) {
+            if (capLogged.add(c.kind)) log("wake clips: cap $cap reached for '${c.kind.prefix}', skipping")
             return
         }
         capLogged.remove(c.kind)
@@ -115,6 +117,9 @@ class WakeClipRecorder(
     companion object {
         /** Clips kept per kind: at ~160 KB each (5 s), both kinds full cost ~320 MB. Bounded, not small. */
         const val DEFAULT_CAP_PER_KIND = 1_000
+
+        /** Marked misses kept: at ~1.9 MB each (60 s), ~190 MB full. Marked by hand, so rarely reached. */
+        const val MISS_CAP = 100
 
         // Pending clips before save() drops: far more than the decoder finalizes in the time one write takes.
         private const val QUEUE_CAPACITY = 16

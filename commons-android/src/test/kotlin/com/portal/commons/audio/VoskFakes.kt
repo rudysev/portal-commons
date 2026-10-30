@@ -181,5 +181,6 @@ internal class RecordingCallbacks {
         words: List<WakeWord>,
         clock: () -> Long = { 0L },
         handoffCooldownMs: Long = 0L,
-    ): WakeDetector = WakeDetector(loader, words, onReady, onUnavailable, diagnostic, handoffCooldownMs, clock)
+        audit: WakeAudit? = null,
+    ): WakeDetector = WakeDetector(loader, words, onReady, onUnavailable, diagnostic, handoffCooldownMs, clock, audit)
 }

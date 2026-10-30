@@ -329,6 +329,27 @@ class WakeDecoderTest {
         assertEquals((12..10 + kept).toList() + 3, clips.single().second)
     }
 
+    @Test fun aMarkedMissSavesTheLastMinute() {
+        val d = audited()
+        val kept = WakeAudit.MISS_MS / PcmCaptureFormat.FRAME_MS
+        d.accept(frame(5), FRAME)
+        repeat(kept) { d.accept(frame(7), FRAME) }
+        d.markMiss()
+        assertEquals(listOf("miss_marked" to List(kept) { 7 }), clips)
+        assertEquals(listOf("miss marked (60 s saved)"), diagnostics)
+    }
+
+    @Test fun aMissMarkedBeforeAnyAudioSavesNothing() {
+        audited().markMiss()
+        assertEquals(emptyList<Pair<String, List<Int>>>(), clips)
+        assertEquals(listOf("miss mark ignored (no audio yet)"), diagnostics)
+    }
+
+    @Test fun aMissMarkedWithClipCaptureOffSavesNothing() {
+        ready().markMiss()
+        assertEquals(listOf("miss mark ignored (wake clips off)"), diagnostics)
+    }
+
     @Test fun aCaptureRestartDropsAudioFromBeforeThePause() {
         val d = audited()
         d.accept(frame(5), FRAME)

@@ -57,6 +57,18 @@ class WakeClipRecorderTest {
         assertEquals(listOf("wake clips: cap 2 reached for 'near', skipping"), logs)
     }
 
+    @Test fun minuteLongMissClipsHaveASmallerCap() {
+        val r = recorder()
+        repeat(WakeClipRecorder.MISS_CAP + 1) {
+            now++
+            r.save(WakeAudit.Clip.MISS, "marked", ByteArray(2))
+            r.awaitIdle() // one at a time: more than the write queue holds
+        }
+        r.awaitIdle()
+
+        assertEquals(WakeClipRecorder.MISS_CAP, names().count { it.startsWith("miss_") })
+    }
+
     @Test fun capIsSeededFromClipsAlreadyOnDisk() {
         File(dir, "near_jarvis_1.wav").writeBytes(ByteArray(0))
         File(dir, "near_jarvis_2.wav").writeBytes(ByteArray(0))

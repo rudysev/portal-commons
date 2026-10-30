@@ -23,13 +23,14 @@ internal class PcmWindow(private val capacityBytes: Int) {
         size = minOf(capacityBytes, size + n - skip)
     }
 
-    /** A fresh copy of the window, oldest byte first. */
-    fun snapshot(): ByteArray {
-        val out = ByteArray(size)
-        val start = (end - size + capacityBytes) % capacityBytes
-        val first = minOf(size, capacityBytes - start)
+    /** A fresh copy of the newest [maxBytes] of the window (all of it by default), oldest byte first. */
+    fun snapshot(maxBytes: Int = capacityBytes): ByteArray {
+        val len = minOf(size, maxBytes)
+        val out = ByteArray(len)
+        val start = (end - len + capacityBytes) % capacityBytes
+        val first = minOf(len, capacityBytes - start)
         System.arraycopy(ring, start, out, 0, first)
-        System.arraycopy(ring, 0, out, first, size - first)
+        System.arraycopy(ring, 0, out, first, len - first)
         return out
     }
 

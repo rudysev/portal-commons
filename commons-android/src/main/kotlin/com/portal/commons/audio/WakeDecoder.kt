@@ -28,9 +28,9 @@ import org.json.JSONObject
  * Diagnostics (`near-miss …`, `flushed final …`, the idle resets) go through a plain `(String) -> Unit`, so it
  * depends on no callback interface. Single-threaded by contract: owned and driven on the capture thread only.
  *
- * **Audit clips.** With an [audit], the last [WakeAudit.CLIP_MS] of frames it decoded are kept, and each wake and
- * near-miss sends that window to it (after the near-miss line is logged). A capture (re)start clears the window, so a
- * clip never carries audio from before a pause.
+ * **Audit clips.** With an [audit], the last [WakeAudit.MISS_MS] of frames it decoded are kept (~1.9 MB). Each wake
+ * and near-miss sends the last [WakeAudit.CLIP_MS] of it (after the near-miss line is logged), and [markMiss] sends all
+ * of it. A capture (re)start clears the window, so a clip never carries audio from before a pause.
  */
 // The model, the live Decoder, the wake words, the diagnostic sink, the clock and the optional audit sink.
 @Suppress("LongParameterList")
@@ -47,7 +47,7 @@ internal class WakeDecoder private constructor(
     private var flushedAtMs = clock() // last instant the lattice was known bounded (reset, new Decoder, or endpoint)
 
     // The audio behind the next decision, kept only when someone audits it.
-    private val window = audit?.let { PcmWindow(WakeAudit.CLIP_MS * PcmCaptureFormat.FRAME_BYTES / FRAME_MS) }
+    private val window = audit?.let { PcmWindow(bytesOf(WakeAudit.MISS_MS)) }
 
     /**
      * Feed one frame, running the idle reset check first. When it finalizes a decode (Vosk endpointed) the lattice
@@ -65,13 +65,13 @@ internal class WakeDecoder private constructor(
         val transcript = render(words)
         return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
             is WakeMatcher.Outcome.Match -> {
-                saveClip(WakeAudit.Clip.WAKE, o.id)
+                save(WakeAudit.Clip.WAKE, o.id, window?.snapshot(CLIP_BYTES))
                 WakeEvent(o.id, transcript)
             }
 
             is WakeMatcher.Outcome.NearMiss -> {
                 diagnostic("near-miss [$transcript] rejected: ${o.reason}")
-                saveClip(WakeAudit.Clip.NEAR, o.keyword)
+                save(WakeAudit.Clip.NEAR, o.keyword, window?.snapshot(CLIP_BYTES))
                 null
             }
 
@@ -110,10 +110,29 @@ internal class WakeDecoder private constructor(
         runCatching { model.close() }
     }
 
-    /** Hand the audit window to [audit], if there is one. Its own failure must never cost a wake. */
-    private fun saveClip(clip: WakeAudit.Clip, word: String) {
-        val w = window ?: return
-        runCatching { audit?.save(clip, word, w.snapshot()) }
+    /**
+     * Someone heard a wake that didn't fire: send the whole window to [audit] as a miss, so it can be labelled and
+     * replayed. Logged either way, so a mark that saved nothing says why.
+     */
+    fun markMiss() {
+        val w = window
+        val pcm = w?.snapshot()
+        when {
+            w == null -> diagnostic("miss mark ignored (wake clips off)")
+
+            pcm == null || pcm.isEmpty() -> diagnostic("miss mark ignored (no audio yet)")
+
+            else -> {
+                diagnostic("miss marked (${pcm.size / bytesOf(MS_PER_S)} s saved)")
+                save(WakeAudit.Clip.MISS, MISS_WORD, pcm)
+            }
+        }
+    }
+
+    /** Send [pcm] to [audit] (none without an audit window). Its own failure must never cost a wake. */
+    private fun save(clip: WakeAudit.Clip, word: String, pcm: ByteArray?) {
+        if (pcm == null) return
+        runCatching { audit?.save(clip, word, pcm) }
             .onFailure { diagnostic("wake clip dropped (${it.message})") }
     }
 
@@ -179,6 +198,15 @@ internal class WakeDecoder private constructor(
         private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
 
         private const val FRAME_MS = PcmCaptureFormat.FRAME_MS
+
+        private const val MS_PER_S = 1_000
+
+        private const val MISS_WORD = "marked" // a miss names no keyword: `miss_marked_<epochMs>.wav`
+
+        /** The PCM bytes in [ms] of audio. */
+        private fun bytesOf(ms: Int) = ms / FRAME_MS * PcmCaptureFormat.FRAME_BYTES
+
+        private val CLIP_BYTES = bytesOf(WakeAudit.CLIP_MS) // a wake or near-miss clip
 
         /**
          * A wake decoder for [words] on [model], sending the audio behind each wake and near-miss to [audit] if

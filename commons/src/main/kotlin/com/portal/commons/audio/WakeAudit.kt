@@ -14,9 +14,10 @@ package com.portal.commons.audio
 fun interface WakeAudit {
 
     /**
-     * Persist [pcm] (16 kHz mono 16-bit LE, oldest sample first, up to [CLIP_MS] long and ending with the frame that
-     * finalized the decode) as evidence of a [clip] for [word]: the wake id of a wake, the decoded keyword of a
-     * near-miss. The array is a snapshot the caller never touches again.
+     * Persist [pcm] (16 kHz mono 16-bit LE, oldest sample first) as evidence of a [clip] for [word]: the wake id of a
+     * wake, the decoded keyword of a near-miss, `marked` for a miss. A wake or near-miss is up to [CLIP_MS] long and
+     * ends with the frame that finalized the decode; a miss is up to [MISS_MS] long and ends when it was marked. The
+     * array is a snapshot the caller never touches again.
      */
     fun save(clip: Clip, word: String, pcm: ByteArray)
 
@@ -27,6 +28,12 @@ fun interface WakeAudit {
 
         /** A wake keyword decoded but a gate rejected it: a missed wake, or a hard negative. */
         NEAR("near"),
+
+        /**
+         * Someone marked a wake that didn't fire. A miss that decodes as `[hey]`, `[unk]` or nothing leaves no
+         * near-miss, so only a person can say one happened.
+         */
+        MISS("miss"),
     }
 
     companion object {
@@ -35,5 +42,8 @@ fun interface WakeAudit {
          * "hey jarvis" ends a second or so before it) plus lead-in, so a replay starts the decoder before the phrase.
          */
         const val CLIP_MS = 5_000
+
+        /** The audio kept behind a marked miss: long enough to cover the wait before someone marks it. */
+        const val MISS_MS = 60_000
     }
 }
