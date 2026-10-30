@@ -1,5 +1,6 @@
 package com.portal.commons.audio
 
+import com.portal.commons.PcmCaptureFormat
 import com.portal.commons.audio.ScriptedDecoder.Companion.frame
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -288,6 +289,62 @@ class WakeDecoderTest {
 
         assertNull(model.live.grammar)
         assertEquals(wake("alexa", "hey(99) alexa(99)"), d.decode(HEY_ALEXA))
+    }
+
+    // ---- audit clips -------------------------------------------------------------------------------
+
+    private val clips = CopyOnWriteArrayList<Pair<String, List<Int>>>()
+
+    private fun audited(): WakeDecoder = checkNotNull(
+        WakeDecoder.create(model, listOf(JARVIS), { diagnostics.add(it) }, clock = { now }) { clip, word, pcm ->
+            clips.add("${clip.prefix}_$word" to tags(pcm))
+        },
+    )
+
+    /** The tag of each frame in a clip's PCM. */
+    private fun tags(pcm: ByteArray) = (pcm.indices step FRAME).map { pcm[it].toInt() }
+
+    @Test fun aWakeSavesTheAudioEndingWithItsFinalizingFrame() {
+        val d = audited()
+        d.accept(frame(5), FRAME)
+        d.decode(HEY_JARVIS_CONFIDENT)
+        assertEquals(listOf("wake_jarvis" to listOf(5, 3)), clips)
+    }
+
+    @Test fun aNearMissSavesUnderItsKeyword() {
+        audited().decode("""{"result":[{"conf":0.99,"word":"jarvis"}],"text":"jarvis"}""")
+        assertEquals(listOf("near_jarvis" to listOf(3)), clips)
+    }
+
+    @Test fun aKeywordFreeDecodeSavesNothing() {
+        audited().decode("""{"result":[{"conf":0.99,"word":"[unk]"}],"text":"[unk]"}""")
+        assertEquals(emptyList<Pair<String, List<Int>>>(), clips)
+    }
+
+    @Test fun theClipHoldsOnlyTheLastClipMs() {
+        val d = audited()
+        val kept = WakeAudit.CLIP_MS / PcmCaptureFormat.FRAME_MS
+        (1..kept).forEach { d.accept(frame(10 + it), FRAME) }
+        d.decode(HEY_JARVIS_CONFIDENT)
+        assertEquals((12..10 + kept).toList() + 3, clips.single().second)
+    }
+
+    @Test fun aCaptureRestartDropsAudioFromBeforeThePause() {
+        val d = audited()
+        d.accept(frame(5), FRAME)
+        d.reset()
+        d.decode(HEY_JARVIS_CONFIDENT)
+        assertEquals(listOf(3), clips.single().second)
+    }
+
+    @Test fun aThrowingAuditNeverCostsTheWake() {
+        val d = checkNotNull(
+            WakeDecoder.create(model, listOf(JARVIS), { diagnostics.add(it) }, clock = { now }) { _, _, _ ->
+                error("disk gone")
+            },
+        )
+        assertEquals(wake("jarvis", "hey(97) jarvis(81)"), d.decode(HEY_JARVIS_CONFIDENT))
+        assertEquals(listOf("wake clip dropped (disk gone)"), diagnostics)
     }
 
     // ---- create / close -----------------------------------------------------------------------------

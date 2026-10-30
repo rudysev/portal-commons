@@ -50,8 +50,9 @@ import java.util.concurrent.atomic.AtomicReference
  * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
  * rest of the backlog, the live frames queued behind it included.
  */
-// The seven inputs the engine wires in (the loader, the wake words, three callbacks, the cooldown length and the
-// clock); only the loader is a seam (ADR 0003), and bundling the callbacks would recreate the Events type it removed.
+// The eight inputs the engine wires in (the loader, the wake words, three callbacks, the cooldown length, the clock and
+// the audit sink); only the loader is a seam (ADR 0003), and bundling the callbacks would recreate the Events type it
+// removed.
 @Suppress("LongParameterList")
 internal class WakeDetector(
     loader: VoskModelLoader,
@@ -62,6 +63,8 @@ internal class WakeDetector(
     private val handoffCooldownMs: Long,
     // Monotonic milliseconds, injected by the engine (and by tests, to drive time).
     private val clock: () -> Long,
+    // Passed to the wake decoder, which sends it the audio behind each wake and near-miss.
+    private val audit: WakeAudit? = null,
 ) {
 
     // The loader → capture-thread handoff: set by the loader callback, taken by the next frame (or freed by
@@ -178,7 +181,7 @@ internal class WakeDetector(
      */
     private fun adoptDeliveredModel(): WakeDecoder? {
         val m = delivered.getAndSet(null) ?: return null
-        val wd = WakeDecoder.create(m, wakeWords, diagnostic, clock = clock)
+        val wd = WakeDecoder.create(m, wakeWords, diagnostic, clock = clock, audit = audit)
         if (wd == null) {
             onUnavailable()
         } else {

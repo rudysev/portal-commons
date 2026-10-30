@@ -107,6 +107,7 @@ class WakeMicEngine internal constructor(
         diagnostic = config.log,
         handoffCooldownMs = config.wakeHandoffCooldownMs,
         clock = clock,
+        audit = config.audit,
     )
 
     /**
