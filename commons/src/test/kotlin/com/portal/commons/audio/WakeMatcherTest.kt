@@ -156,6 +156,21 @@ class WakeMatcherTest {
         assertNull(WakeMatcher.match(rec("hey" to 0.71, "jarvis" to 0.99), words))
     }
 
+    @Test fun strictWord_decoyInDecode_doesNotMatch() {
+        // A decoy is a named "[unk]": speech the grammar explains as "harvey" rather than "jarvis" is still
+        // non-wake audio in the window, so a strict route rejects it just as it rejects "[unk]".
+        assertEquals(
+            WakeMatcher.Outcome.NearMiss("jarvis", "contaminated ('harvey' in decode)"),
+            WakeMatcher.evaluate(rec("harvey" to 0.80, "hey" to 0.99, "jarvis" to 0.99), words),
+        )
+    }
+
+    @Test fun jarvisHasDecoys_noneOfThemALeadOrTheKeyword() {
+        val decoys = WakeMatcher.decoysFor(jarvis)
+        assertTrue(decoys.isNotEmpty())
+        assertTrue(decoys.none { it == "jarvis" || it in WakeMatcher.LEAD_ALIASES.getValue("hey") })
+    }
+
     @Test fun strictWord_contaminatedDecode_doesNotMatch() {
         // The live FP verbatim: `[unk](51) hey(99) jarvis(99)` — a 3-word "clean" phrase with BOTH words maxed,
         // so no confidence floor could ever catch it. The leading "[unk]" is background audio captured in the

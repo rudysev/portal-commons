@@ -201,6 +201,8 @@ internal class WakeDecoder private constructor(
          * fires on a bare keyword, and offering one let the decoder explain a quiet, unstressed "hey" as silence
          * and decode `[jarvis]` alone, the commonest missed wake on device. Without it the decoder has to account
          * for that audio as the lead (or "[unk]").
+         *
+         * A keyword's [WakeMatcher.DECOYS] follow its entries, so speech that only resembles it has a closer match.
          */
         private fun buildGrammar(words: List<WakeWord>): String {
             val entries = LinkedHashSet<String>()
@@ -208,6 +210,7 @@ internal class WakeDecoder private constructor(
                 entries.add(it.phrase.lowercase())
                 val lead = it.lead
                 if (lead == null) entries.add(it.keyword.lowercase()) else entries.add(lead.lowercase())
+                entries.addAll(WakeMatcher.decoysFor(it))
             }
             entries.add(WakeMatcher.UNK_TOKEN) // same token WakeMatcher's strict contamination gate rejects
             return entries.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
