@@ -46,7 +46,7 @@ class WakeDecoderTest {
 
     @Test fun textOnlyDecodeHasNoConfidence_soOnlyALenientRouteFires() {
         assertNull(ready().decode("""{"text":"hey jarvis"}"""))
-        assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.7 floor"), diagnostics)
+        assertEquals(listOf("near-miss [hey jarvis] rejected: 'hey' under 0.8 floor"), diagnostics)
     }
 
     @Test fun textOnlyDecodeFiresALenientRoute() {

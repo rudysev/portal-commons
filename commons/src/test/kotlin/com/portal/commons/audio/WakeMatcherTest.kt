@@ -150,9 +150,10 @@ class WakeMatcherTest {
         assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.96, "jarvis" to 0.95), words))
     }
 
-    @Test fun strictWord_quietHey_matches() {
-        // A genuine wake whose quiet, unstressed "hey" decodes at 0.7x on the Portal mic: over the floor, so it fires.
-        assertEquals("jarvis", WakeMatcher.match(rec("hey" to 0.72, "jarvis" to 0.95), words))
+    @Test fun strictWord_borderlineHey_doesNotMatch() {
+        // A live false wake: no "hey" was spoken, but room audio just before a bare "jarvis" decoded as
+        // `hey(71) jarvis(99)`. Replayed offline it fires only while the floor is 0.70, so a 0.7x "hey" is rejected.
+        assertNull(WakeMatcher.match(rec("hey" to 0.71, "jarvis" to 0.99), words))
     }
 
     @Test fun strictWord_contaminatedDecode_doesNotMatch() {
