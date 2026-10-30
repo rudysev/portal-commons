@@ -104,6 +104,23 @@ class WakeDetectorTest {
         assertEquals(listOf("wake set changed → rebuilding grammar (1 word(s))"), callbacks.lines)
     }
 
+    @Test fun aMissMarkedFromAnotherThreadIsSavedAtTheNextFrame() {
+        val clips = mutableListOf<String>()
+        val d = callbacks.detector(loader, listOf(JARVIS), audit = { clip, word, _ ->
+            clips.add("${clip.prefix}_$word")
+        })
+        loader.complete(model)
+        d.start()
+        d.accept(frame(TAG_PRIME), FRAME)
+        thread(name = "controller") { d.markMiss() }.join()
+        assertEquals("nothing saved off the capture thread", emptyList<String>(), clips)
+
+        d.accept(frame(2), FRAME)
+        d.accept(frame(2), FRAME)
+
+        assertEquals("saved once, at the first frame after the mark", listOf("miss_marked"), clips)
+    }
+
     // ---- handoff cooldown -----------------------------------------------------------------------------
 
     @Test fun noFrameReachesTheWakeDecoderUntilTheHandoffCooldownElapses() {

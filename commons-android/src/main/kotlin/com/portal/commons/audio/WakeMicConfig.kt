@@ -14,6 +14,7 @@ import com.portal.commons.DebugLog
  *   making to the engine (its constructor included). Consumers can update service/UI state directly. None is
  *   delivered after [WakeMicEngine.close], including ones already posted.
  * - [beforeMicAcquire] — **caller thread** of [WakeMicEngine.start], synchronously before the mic is opened.
+ * - [audit] — **capture thread**, on each wake and near-miss; must not block (see [WakeAudit]).
  */
 data class WakeMicConfig(
     val wakeWords: List<WakeWord>,
@@ -32,6 +33,8 @@ data class WakeMicConfig(
      */
     val onCaptureLost: (CaptureLoss) -> Unit = {},
     val beforeMicAcquire: () -> Unit = {},
+    /** Receives the audio behind each wake and near-miss (e.g. a [WakeClipRecorder]); null records nothing. */
+    val audit: WakeAudit? = null,
     val log: (String) -> Unit = DebugLog::log,
 ) {
     companion object {
