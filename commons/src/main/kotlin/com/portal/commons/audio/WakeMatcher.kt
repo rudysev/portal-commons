@@ -71,6 +71,29 @@ object WakeMatcher {
     fun acceptedLeads(w: WakeWord): Set<String>? = w.lead?.let { LEAD_ALIASES[it] ?: setOf(it) }
 
     /**
+     * **Decoys**: words that sound like a keyword, added to the wake decoder's grammar so ordinary speech has a closer
+     * match than the keyword. With only the phrase, the lead and "[unk]" to choose from, the decoder forces speech
+     * like "this is" or "his job" onto "jarvis" (at confidences up to 1.00), dozens of times an hour of talk; each is
+     * one stray "hey" away from a false wake. Replaying 19 minutes of a talk that false-fired near the Portal,
+     * these took "jarvis" decodes from 16 to 1, and the recorded wakes still fired.
+     *
+     * Keyed by keyword, so they apply to "jarvis" whichever app declares it. On a strict route a decoy in the decode is
+     * contamination, like [UNK_TOKEN]. Never a lead or a keyword, and no common short words: the decoder fits those
+     * to the lead-in before a real "hey jarvis" (`the hey jarvis`), which costs the wake.
+     */
+    val DECOYS: Map<String, List<String>> = mapOf(
+        "jarvis" to listOf(
+            "travis", "davis", "harvest", "nervous", "service", "jars", "java", "jealous", "garage", "marvin",
+            "purpose", "carvings", "chavez", "harvey", "charges", "arches",
+        ),
+    )
+
+    private val ALL_DECOYS: Set<String> = DECOYS.values.flatten().toSet()
+
+    /** The [DECOYS] for [w]'s keyword; empty for a word with none. */
+    fun decoysFor(w: WakeWord): List<String> = DECOYS[w.keyword.lowercase()].orEmpty()
+
+    /**
      * Vosk's "unknown" escape token — the single source of truth for it: the wake decoder's grammar adds
      * this exact string to the grammar and this gate rejects it, so the two can't drift. Its presence in a
      * final decode means non-wake audio was captured in the same window — contamination a **strict** route
@@ -204,24 +227,28 @@ object WakeMatcher {
         w: WakeWord,
         wakeWords: List<WakeWord>,
         leads: Set<String>?,
-    ): String? = when {
-        // Contamination first: an "[unk]" in the final means non-wake audio decoded in the same window. A
-        // genuine close-mic wake decodes as a bare "<hey> <keyword>" with no "[unk]" (observed across every
-        // real fire); a leading/trailing "[unk]" is the tell-tale of background audio assembling a wake
-        // (observed live FP: `[unk](51) hey(99) jarvis(99)` — both words maxed, so no confidence floor
-        // could catch it). Strict = uncontaminated, so reject any "[unk]" outright.
-        lower.any { it.word == UNK_TOKEN } -> "contaminated ('$UNK_TOKEN' in decode)"
+    ): String? {
+        // A decoy is a named "[unk]": non-wake speech, only explained by a closer word.
+        val contaminant = lower.firstOrNull { it.word == UNK_TOKEN || it.word in ALL_DECOYS }?.word
+        return when {
+            // Contamination first: an "[unk]" in the final means non-wake audio decoded in the same window. A
+            // genuine close-mic wake decodes as a bare "<hey> <keyword>" with no "[unk]" (observed across every
+            // real fire); a leading/trailing "[unk]" is the tell-tale of background audio assembling a wake
+            // (observed live FP: `[unk](51) hey(99) jarvis(99)` — both words maxed, so no confidence floor
+            // could catch it). Strict = uncontaminated, so reject any "[unk]" outright.
+            contaminant != null -> "contaminated ('$contaminant' in decode)"
 
-        lower.size > CLEAN_PHRASE_MAX_WORDS -> "phrase too long (${lower.size} words > $CLEAN_PHRASE_MAX_WORDS)"
+            lower.size > CLEAN_PHRASE_MAX_WORDS -> "phrase too long (${lower.size} words > $CLEAN_PHRASE_MAX_WORDS)"
 
-        leads != null && lower.subList(0, i).none { it.word in leads && it.conf >= LEAD_MIN_CONF } ->
-            "'${w.lead}' under $LEAD_MIN_CONF floor"
+            leads != null && lower.subList(0, i).none { it.word in leads && it.conf >= LEAD_MIN_CONF } ->
+                "'${w.lead}' under $LEAD_MIN_CONF floor"
 
-        lower[i].conf < w.minConf -> underFloor(lower[i], w)
+            lower[i].conf < w.minConf -> underFloor(lower[i], w)
 
-        containsRivalKeyword(lower, w, wakeWords) -> "rival wake keyword in decode"
+            containsRivalKeyword(lower, w, wakeWords) -> "rival wake keyword in decode"
 
-        else -> null
+            else -> null
+        }
     }
 
     /** The rejection reason for a [keyword] decoded under [w]'s confidence floor. */

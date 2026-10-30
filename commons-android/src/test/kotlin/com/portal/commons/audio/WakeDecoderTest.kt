@@ -224,12 +224,11 @@ class WakeDecoderTest {
 
     // ---- grammar ------------------------------------------------------------------------------------
 
-    @Test fun grammarListsEachPhraseAndLeadThenUnk_andABareKeywordOnlyForALeadlessWord() {
+    @Test fun grammarListsEachPhraseLeadAndDecoysThenUnk_andABareKeywordOnlyForALeadlessWord() {
         ready(listOf(JARVIS, ALEXA, COMPUTER))
-        assertEquals(
-            """["hey jarvis", "hey", "hey alexa", "computer", "[unk]"]""",
-            model.decoders.single().grammar,
-        )
+        val entries =
+            listOf("hey jarvis", "hey") + WakeMatcher.decoysFor(JARVIS) + listOf("hey alexa", "computer", "[unk]")
+        assertEquals(entries.joinToString(prefix = "[", postfix = "]") { "\"$it\"" }, model.decoders.single().grammar)
     }
 
     @Test fun rejectedGrammarFallsBackToOpenVocabulary() {
