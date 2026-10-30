@@ -48,11 +48,12 @@ object WakeMatcher {
     /**
      * Confidence floor the preceding lead (e.g. "hey") must clear on a **strict** route. It blocks a
      * background-audio FP that assembles a short clean "hey jarvis" with an under-confident "hey" — observed
-     * live at 0.66 during a phone call held near the Portal — so it stays above that. A quiet, unstressed "hey"
-     * on the Portal mic often decodes at 0.7x in a genuine wake, so it sits just above the FP (see `TUNING.md`).
+     * live at 0.66 during a phone call held near the Portal, and room audio before a bare "jarvis" decoded as
+     * `hey(71)`. A quiet, unstressed "hey" in a genuine wake can decode at 0.7x too, so 0.70 caught more wakes,
+     * but it let that second false wake through, so the floor is back at 0.80 (see `TUNING.md`).
      * Lenient routes do not apply it (present-only, for recall).
      */
-    const val LEAD_MIN_CONF = 0.70
+    const val LEAD_MIN_CONF = 0.80
 
     /**
      * Decoded variants accepted for a declared lead word (open recognition mishears it). The lead itself
