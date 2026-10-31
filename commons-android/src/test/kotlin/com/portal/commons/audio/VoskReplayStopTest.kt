@@ -42,6 +42,8 @@ class VoskReplayStopTest {
 
         override fun finalResult() = """{"text" : ""}"""
 
+        override fun flushResult() = finalResult()
+
         override fun partialResult() = """{"partial" : ""}"""
 
         override fun reset() = Unit

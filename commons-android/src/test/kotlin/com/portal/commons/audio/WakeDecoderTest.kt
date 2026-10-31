@@ -37,6 +37,49 @@ class WakeDecoderTest {
         accept(frame(tag), FRAME)
     }
 
+    // ---- the hybrid's window check and the shadow's forced finish ------------------------------------
+
+    private fun window(vararg frames: ByteArray): ByteArray = frames.fold(ByteArray(0)) { acc, f -> acc + f }
+
+    @Test fun windowCheckJudgesTheForcedFinalAndClosesItsOwnDecoder() {
+        model.finals.add(HEY_JARVIS_CONFIDENT)
+        val j = checkNotNull(WakeDecoder.judgeWindow(model, listOf(JARVIS), window(frame(2), frame(2))))
+        assertEquals(WakeMatcher.Outcome.Match("jarvis"), j.outcome)
+        assertEquals("hey(97) jarvis(81)", j.transcript)
+        val dec = model.decoders.single()
+        assertEquals(listOf(2, 2), dec.fedTags())
+        assertEquals(listOf("flush", "close"), dec.log.takeLast(2))
+        assertEquals(0, model.closeCount) // the model is only borrowed
+    }
+
+    @Test fun windowCheckPrefersAMatchToALaterNearMiss() {
+        model.finals.add(HEY_JARVIS_CONFIDENT) // finalized mid-window
+        model.finals.add("""{"result":[{"conf":0.9,"word":"jarvis"}],"text":"jarvis"}""") // the forced final
+        val j = checkNotNull(WakeDecoder.judgeWindow(model, listOf(JARVIS), window(frame(2, endpoint = true))))
+        assertEquals(WakeMatcher.Outcome.Match("jarvis"), j.outcome)
+    }
+
+    @Test fun windowCheckKeepsTheFirstOfTwoMatches() {
+        model.finals.add(HEY_JARVIS_CONFIDENT) // finalized mid-window
+        model.finals.add("""{"result":[{"conf":0.97,"word":"hey"},{"conf":0.9,"word":"alexa"}],"text":"hey alexa"}""")
+        val words = listOf(JARVIS, ALEXA)
+        val j = checkNotNull(WakeDecoder.judgeWindow(model, words, window(frame(2, endpoint = true))))
+        assertEquals(WakeMatcher.Outcome.Match("jarvis"), j.outcome)
+    }
+
+    @Test fun windowCheckWithNoDecoderIsNull() {
+        model.failBuilds = true
+        assertNull(WakeDecoder.judgeWindow(model, listOf(JARVIS), window(frame(2))))
+    }
+
+    @Test fun finishJudgesTheInFlightDecode() {
+        val wd = ready()
+        wd.frameAt(0)
+        model.finals.add(HEY_JARVIS_CONFIDENT)
+        assertEquals(WakeMatcher.Outcome.Match("jarvis"), wd.finish().outcome)
+        assertEquals("flush", model.live.log.last())
+    }
+
     // ---- final-result decoding → wake / near-miss / flushed final -----------------------------------
 
     @Test fun confidentWakeIsReturnedWithItsDecode() {

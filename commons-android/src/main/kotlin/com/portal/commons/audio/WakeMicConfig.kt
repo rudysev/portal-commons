@@ -14,6 +14,7 @@ import com.portal.commons.DebugLog
  *   making to the engine (its constructor included). Consumers can update service/UI state directly. None is
  *   delivered after [WakeMicEngine.close], including ones already posted.
  * - [beforeMicAcquire] — **caller thread** of [WakeMicEngine.start], synchronously before the mic is opened.
+ * - [hybrid]'s callbacks — see [HybridWakeConfig]. A hybrid wake still reaches [onWake] on the capture thread.
  */
 data class WakeMicConfig(
     val wakeWords: List<WakeWord>,
@@ -32,6 +33,8 @@ data class WakeMicConfig(
      */
     val onCaptureLost: (CaptureLoss) -> Unit = {},
     val beforeMicAcquire: () -> Unit = {},
+    /** Runs the **hybrid wake detector** beside the Vosk one (see [HybridWakeDetector]); null runs Vosk alone. */
+    val hybrid: HybridWakeConfig? = null,
     val log: (String) -> Unit = DebugLog::log,
 ) {
     companion object {

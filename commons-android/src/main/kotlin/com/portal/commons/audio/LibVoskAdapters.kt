@@ -78,6 +78,8 @@ internal class LibVoskDecoder(private val rec: Recognizer) : VoskDecoder {
 
     override fun finalResult(): String = rec.result
 
+    override fun flushResult(): String = rec.finalResult
+
     override fun partialResult(): String = rec.partialResult
 
     override fun reset() = rec.reset()

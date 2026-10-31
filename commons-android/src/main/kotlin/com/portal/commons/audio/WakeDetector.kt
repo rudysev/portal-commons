@@ -49,8 +49,12 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * **Audio buffered before a wake is never decoded after it.** A backlog frame that wakes ends the call and drops the
  * rest of the backlog, the live frames queued behind it included.
+ *
+ * **Sharing the model with the hybrid wake detector.** The adopted model is wrapped in a [ModelLease] and handed to
+ * [onModelAdopted], so the hybrid's window check can borrow it from its own thread. [skipFrame] keeps adoption and
+ * wake-word updates going while the engine wants no frame decoded (the hybrid with the Vosk shadow off).
  */
-// The seven inputs the engine wires in (the loader, the wake words, three callbacks, the cooldown length and the
+// The eight inputs the engine wires in (the loader, the wake words, four callbacks, the cooldown length and the
 // clock); only the loader is a seam (ADR 0003), and bundling the callbacks would recreate the Events type it removed.
 @Suppress("LongParameterList")
 internal class WakeDetector(
@@ -62,6 +66,8 @@ internal class WakeDetector(
     private val handoffCooldownMs: Long,
     // Monotonic milliseconds, injected by the engine (and by tests, to drive time).
     private val clock: () -> Long,
+    // Capture thread, once, when the wake decoder adopts the model: the model as the hybrid may borrow it.
+    private val onModelAdopted: (ModelLease) -> Unit = {},
 ) {
 
     // The loader → capture-thread handoff: set by the loader callback, taken by the next frame (or freed by
@@ -132,6 +138,24 @@ internal class WakeDetector(
     }
 
     /**
+     * Take a frame the engine wants left undecoded: apply a pending wake-word update and adopt a delivered model (so
+     * readiness and the hybrid's model still arrive), but decode, buffer and queue nothing. The backlog is dropped:
+     * the engine [start]s the detector again before it next wants frames decoded.
+     */
+    fun skipFrame() {
+        applyPendingWakeWords()
+        if (wakeDecoder == null) adoptDeliveredModel()
+        backlog.clear()
+        preReadyBuffer.drain()
+    }
+
+    /**
+     * Finalize and judge the decode in flight ([WakeDecoder.finish]); null before the wake decoder exists. Capture
+     * thread, just before a hybrid wake's handoff pauses capture.
+     */
+    fun finishShadow(): VoskJudgement? = wakeDecoder?.let { wd -> runCatching { wd.finish() }.getOrNull() }
+
+    /**
      * Swap to a new wake set **without reloading the model** ([WakeDecoder.updateWakeWords]), from any thread. It is
      * applied on the capture thread at the next [accept], before that frame is decoded, so a Decoder is never closed
      * mid-[accept]. Before the wake decoder exists it becomes the set adoption builds from.
@@ -178,11 +202,13 @@ internal class WakeDetector(
      */
     private fun adoptDeliveredModel(): WakeDecoder? {
         val m = delivered.getAndSet(null) ?: return null
-        val wd = WakeDecoder.create(m, wakeWords, diagnostic, clock = clock)
+        val lease = ModelLease(m)
+        val wd = WakeDecoder.create(lease, wakeWords, diagnostic, clock = clock)
         if (wd == null) {
             onUnavailable()
         } else {
             wakeDecoder = wd
+            onModelAdopted(lease)
             onReady()
             val buffered = preReadyBuffer.drain()
             if (buffered.isNotEmpty()) diagnostic("flushing ${buffered.size} pre-ready frame(s)")

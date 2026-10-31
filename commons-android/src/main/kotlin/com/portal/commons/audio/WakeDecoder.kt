@@ -50,21 +50,31 @@ internal class WakeDecoder private constructor(
         maybeIdleReset()
         if (!decoder.acceptFrame(buf, n)) return null
         latticeBounded()
-        val words = parseResult(decoder.finalResult())
-        val transcript = render(words)
-        return when (val o = WakeMatcher.evaluate(words, wakeWords)) {
-            is WakeMatcher.Outcome.Match -> WakeEvent(o.id, transcript)
+        val j = judge(decoder.finalResult(), wakeWords)
+        return when (val o = j.outcome) {
+            is WakeMatcher.Outcome.Match -> WakeEvent(o.id, j.transcript)
 
             is WakeMatcher.Outcome.NearMiss -> {
-                diagnostic("near-miss [$transcript] rejected: ${o.reason}")
+                diagnostic("near-miss [${j.transcript}] rejected: ${o.reason}")
                 null
             }
 
             WakeMatcher.Outcome.None -> {
-                if (transcript.isNotEmpty()) diagnostic("flushed final [$transcript]")
+                if (j.transcript.isNotEmpty()) diagnostic("flushed final [${j.transcript}]")
                 null
             }
         }
+    }
+
+    /**
+     * Finalize the in-flight decode now and judge it, without waiting for Vosk to endpoint: the hybrid wake detector
+     * asks the Vosk shadow for its verdict this way just before capture pauses for a hybrid wake's handoff, which
+     * would otherwise cut the shadow off before it endpoints. The lattice is flushed with it.
+     */
+    fun finish(): VoskJudgement {
+        val j = judge(decoder.flushResult(), wakeWords)
+        latticeBounded()
+        return j
     }
 
     /**
@@ -152,6 +162,50 @@ internal class WakeDecoder private constructor(
         private const val NO_CONF = -1.0 // sentinel: the decoder gave no per-word confidence
 
         private const val PERCENT = 100 // a 0..1 confidence renders as a whole percent
+
+        /** How long the window check feeds silence after the window, so a "jarvis" at its very end finalizes. */
+        private const val WINDOW_TAIL_FRAMES = 6
+
+        /**
+         * The window check of the hybrid wake detector: decode [pcm] (16 kHz mono 16-bit LE) as one utterance on a
+         * fresh warmed Decoder for [words] on [model], with the production grammar and [WakeMatcher] gates, followed
+         * by [WINDOW_TAIL_FRAMES] frames of silence and a forced finalize. Every decode it finalizes is judged; the
+         * verdict is the first match, else the last near-miss, else the last decode. Null when no Decoder can be built.
+         * Any thread: the Decoder is its own, and [model] is only borrowed (see [ModelLease]).
+         */
+        fun judgeWindow(model: VoskModel, words: List<WakeWord>, pcm: ByteArray): VoskJudgement? {
+            val dec = buildDecoder(model, words) ?: return null
+            try {
+                val step = PcmCaptureFormat.FRAME_BYTES
+                val frames = (pcm.indices step step).map { pcm.copyOfRange(it, minOf(pcm.size, it + step)) } +
+                    List(WINDOW_TAIL_FRAMES) { ByteArray(step) }
+                var verdict: VoskJudgement? = null
+                for (f in frames) {
+                    if (dec.acceptFrame(f, f.size)) verdict = stronger(verdict, judge(dec.finalResult(), words))
+                }
+                return stronger(verdict, judge(dec.flushResult(), words))
+            } finally {
+                runCatching { dec.close() }
+            }
+        }
+
+        /** The verdict that settles a window: a match over a near-miss over nothing; first match, else the later. */
+        private fun stronger(a: VoskJudgement?, b: VoskJudgement): VoskJudgement {
+            fun rank(j: VoskJudgement) = when (j.outcome) {
+                is WakeMatcher.Outcome.Match -> 2
+                is WakeMatcher.Outcome.NearMiss -> 1
+                WakeMatcher.Outcome.None -> 0
+            }
+            if (a == null) return b
+            val keepA = rank(a) > rank(b) || (rank(a) == rank(b) && a.outcome is WakeMatcher.Outcome.Match)
+            return if (keepA) a else b
+        }
+
+        /** Judge one Vosk final-result JSON against [wakeWords]. */
+        private fun judge(json: String, wakeWords: List<WakeWord>): VoskJudgement {
+            val words = parseResult(json)
+            return VoskJudgement(WakeMatcher.evaluate(words, wakeWords), render(words))
+        }
 
         /** A wake decoder for [words] on [model]; null, with [model] closed, when the first Decoder can't be built. */
         fun create(
@@ -247,3 +301,6 @@ internal class WakeDecoder private constructor(
         }
     }
 }
+
+/** What the wake decoder made of one decode: the [WakeMatcher] outcome and the decode as the log renders it. */
+internal class VoskJudgement(val outcome: WakeMatcher.Outcome, val transcript: String)
