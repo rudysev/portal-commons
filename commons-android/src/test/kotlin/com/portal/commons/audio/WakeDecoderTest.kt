@@ -59,6 +59,14 @@ class WakeDecoderTest {
         assertEquals(WakeMatcher.Outcome.Match("jarvis"), j.outcome)
     }
 
+    @Test fun windowCheckKeepsTheFirstOfTwoMatches() {
+        model.finals.add(HEY_JARVIS_CONFIDENT) // finalized mid-window
+        model.finals.add("""{"result":[{"conf":0.97,"word":"hey"},{"conf":0.9,"word":"alexa"}],"text":"hey alexa"}""")
+        val words = listOf(JARVIS, ALEXA)
+        val j = checkNotNull(WakeDecoder.judgeWindow(model, words, window(frame(2, endpoint = true))))
+        assertEquals(WakeMatcher.Outcome.Match("jarvis"), j.outcome)
+    }
+
     @Test fun windowCheckWithNoDecoderIsNull() {
         model.failBuilds = true
         assertNull(WakeDecoder.judgeWindow(model, listOf(JARVIS), window(frame(2))))

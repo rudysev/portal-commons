@@ -54,10 +54,10 @@ class HybridPartsTest {
     fun `a candidate completes 400 ms after the gate opens, with the last 2 s as its window`() {
         val gate = ToneGate()
         val cg = CandidateGate(gate) { 0.3f }
-        assertNull(cg.feed(samples(2_000), nowMs = 1))
-        assertNull(cg.feed(samples(80, LOUD), nowMs = 2)) // opens the candidate
-        assertNull(cg.feed(samples(320), nowMs = 3))
-        val c = cg.feed(samples(80), nowMs = 4)!! // the fifth gate frame after it
+        assertNull(cg.feed(samples(2_000), capturedAtMs = 1))
+        assertNull(cg.feed(samples(80, LOUD), capturedAtMs = 2)) // opens the candidate
+        assertNull(cg.feed(samples(320), capturedAtMs = 3))
+        val c = cg.feed(samples(80), capturedAtMs = 4)!! // the fifth gate frame after it
         assertEquals(2L, c.openedAtMs)
         assertEquals(HIGH, c.peak)
         assertEquals(CandidateGate.samplesFor(CandidateGate.WINDOW_MS), c.window.size)
@@ -69,18 +69,18 @@ class HybridPartsTest {
     @Test
     fun `the 2 s refractory makes one utterance one candidate, and reset forgets an open one`() {
         val cg = CandidateGate(ToneGate()) { 0.3f }
-        val found = (0 until 40).mapNotNull { cg.feed(samples(80, LOUD), nowMs = it.toLong()) }
+        val found = (0 until 40).mapNotNull { cg.feed(samples(80, LOUD), capturedAtMs = it.toLong()) }
         assertEquals(listOf(0L, 25L), found.map { it.openedAtMs }) // 2 s = 25 gate frames apart
-        cg.feed(samples(80, LOUD), nowMs = 100) // a long time later: opens again
+        cg.feed(samples(80, LOUD), capturedAtMs = 100) // a long time later: opens again
         cg.reset()
-        assertTrue((0 until 10).all { cg.feed(samples(80), nowMs = 200) == null })
+        assertTrue((0 until 10).all { cg.feed(samples(80), capturedAtMs = 200) == null })
     }
 
     @Test
     fun `capture frames are re-cut into whole gate frames`() {
         val gate = ToneGate()
         val cg = CandidateGate(gate) { 0.3f }
-        repeat(4) { cg.feed(samples(100), nowMs = 0) } // 400 ms = 5 gate frames
+        repeat(4) { cg.feed(samples(100), capturedAtMs = 0) } // 400 ms = 5 gate frames
         assertEquals(5, gate.scored)
     }
 

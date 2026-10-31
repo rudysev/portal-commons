@@ -28,10 +28,10 @@ internal class CandidateGate(private val gate: WakeGate, private val threshold: 
         private set
 
     /**
-     * Feed [samples] of capture audio; returns the candidate it completed, if any. [nowMs] stamps a candidate that
-     * opens inside this call.
+     * Feed [samples] of capture audio; returns the candidate it completed, if any. [capturedAtMs], the wall-clock
+     * time [samples] were captured, stamps a candidate that opens inside this call.
      */
-    fun feed(samples: ShortArray, nowMs: Long): Candidate? {
+    fun feed(samples: ShortArray, capturedAtMs: Long): Candidate? {
         var completed: Candidate? = null
         var gateNanos = 0L
         var i = 0
@@ -43,7 +43,7 @@ internal class CandidateGate(private val gate: WakeGate, private val threshold: 
             if (pendingSamples == pending.size) {
                 pendingSamples = 0
                 val started = System.nanoTime()
-                val c = gateFrame(pending.copyOf(), nowMs)
+                val c = gateFrame(pending.copyOf(), capturedAtMs)
                 gateNanos += System.nanoTime() - started
                 if (c != null) completed = c
             }

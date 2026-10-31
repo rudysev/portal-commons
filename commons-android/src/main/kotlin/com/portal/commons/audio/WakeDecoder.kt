@@ -189,14 +189,16 @@ internal class WakeDecoder private constructor(
             }
         }
 
-        /** The verdict that settles a window: a match over a near-miss over nothing; the later of two equals. */
+        /** The verdict that settles a window: a match over a near-miss over nothing; first match, else the later. */
         private fun stronger(a: VoskJudgement?, b: VoskJudgement): VoskJudgement {
             fun rank(j: VoskJudgement) = when (j.outcome) {
                 is WakeMatcher.Outcome.Match -> 2
                 is WakeMatcher.Outcome.NearMiss -> 1
                 WakeMatcher.Outcome.None -> 0
             }
-            return if (a != null && rank(a) > rank(b)) a else b
+            if (a == null) return b
+            val keepA = rank(a) > rank(b) || (rank(a) == rank(b) && a.outcome is WakeMatcher.Outcome.Match)
+            return if (keepA) a else b
         }
 
         /** Judge one Vosk final-result JSON against [wakeWords]. */

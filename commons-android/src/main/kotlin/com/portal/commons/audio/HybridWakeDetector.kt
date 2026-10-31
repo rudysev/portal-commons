@@ -48,7 +48,7 @@ internal class HybridWakeDetector(
     // Wall-clock epoch milliseconds, for evidence timestamps.
     private val wallClock: () -> Long = System::currentTimeMillis,
 ) {
-    private class Chunk(val generation: Long, val samples: ShortArray)
+    private class Chunk(val generation: Long, val samples: ShortArray, val atMs: Long)
 
     private class PendingWake(val generation: Long, val event: WakeEvent, val candidateAtMs: Long)
 
@@ -152,7 +152,7 @@ internal class HybridWakeDetector(
         now: Long,
     ): WakeEvent? {
         startThreads()
-        if (!frames.offer(Chunk(generation.get(), samples))) droppedFrames++
+        if (!frames.offer(Chunk(generation.get(), samples, now))) droppedFrames++
         // A Vosk wake of a word the hybrid doesn't decide is delivered as before.
         if (vosk != null && vosk.wakeId != config.wakeId) return vosk.also { voskWake(it, now) }
         if (vosk != null) {
@@ -214,7 +214,7 @@ internal class HybridWakeDetector(
                     candidates.reset()
                     gen = chunk.generation
                 }
-                val c = candidates.feed(chunk.samples, wallClock())
+                val c = candidates.feed(chunk.samples, chunk.atMs)
                 countGate(candidates.lastGateNanos)
                 if (c != null && !work.offer(Work(gen, c))) {
                     droppedCandidates.incrementAndGet()
