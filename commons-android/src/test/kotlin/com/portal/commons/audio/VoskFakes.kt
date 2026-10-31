@@ -130,6 +130,12 @@ internal class ScriptedDecoder(val grammar: String?, private val finals: Queue<S
 
     override fun finalResult(): String = lastFinal
 
+    /** A forced finalize: the next queued [finals] JSON, or an empty decode. Logged as `flush`. */
+    override fun flushResult(): String {
+        log.add("flush")
+        return finals.poll() ?: """{"text" : ""}"""
+    }
+
     override fun partialResult(): String {
         partialQueries++
         return partial

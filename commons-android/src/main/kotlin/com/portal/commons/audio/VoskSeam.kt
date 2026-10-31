@@ -31,6 +31,12 @@ internal interface VoskDecoder {
     /** The final-result JSON of the decode the last [acceptFrame] finalized. */
     fun finalResult(): String
 
+    /**
+     * Finalize the in-flight decode now, without waiting for Vosk to endpoint, and return its final-result JSON. The
+     * Decoder starts a fresh utterance after it.
+     */
+    fun flushResult(): String
+
     /** The in-flight partial-result JSON (`{"partial" : "hey jar"}`). */
     fun partialResult(): String
 

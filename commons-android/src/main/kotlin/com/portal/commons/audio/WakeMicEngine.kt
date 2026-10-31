@@ -44,6 +44,10 @@ import java.util.concurrent.TimeUnit
  *
  * **The wake detector's calls** follow the threading contract on [WakeDetector]. Its readiness and unavailability
  * reach the consumer on the main thread.
+ *
+ * **Hybrid.** With [WakeMicConfig.hybrid] set, every frame goes through the [HybridWakeDetector]'s per-frame policy
+ * instead, which drives the Vosk wake detector itself and returns the wake to deliver; it shares the Vosk model the
+ * wake detector adopts, and is closed before it.
  */
 class WakeMicEngine internal constructor(
     private val config: WakeMicConfig,
@@ -64,10 +68,15 @@ class WakeMicEngine internal constructor(
     // The wake policy, passed on every start() so a start() during an open request joins it. PcmCapture runs its
     // capture-thread callbacks only for the current capture request, only while open, and never two at once.
     private val listener = object : PcmCapture.Listener {
-        override fun onStarted() = detector.start()
+        override fun onStarted() {
+            detector.start()
+            hybrid?.onStarted()
+        }
 
         override fun onFrame(buf: ByteArray, n: Int) {
-            detector.accept(buf, n)?.let(::deliver)
+            val h = hybrid
+            val wake = if (h == null) detector.accept(buf, n) else h.onFrame(buf, n, detector)
+            wake?.let(::deliver)
         }
 
         override fun onLost(loss: CaptureLoss) {
@@ -86,11 +95,17 @@ class WakeMicEngine internal constructor(
             idleRebuildMs = CapturePolicy.DEFAULT_IDLE_REBUILD_MS,
             silence = CapturePolicy.Silence(SILENCE_WINDOW_MS),
         ),
-        onClosed = { detector.close() },
+        onClosed = {
+            hybrid?.close()
+            detector.close()
+        },
     )
 
     /** Posts [callback] to the main thread, never inline. It runs only if the engine is still open when delivered. */
     private fun deliverOnMain(callback: () -> Unit) = postToMain { if (!capture.isClosed) callback() }
+
+    private val hybrid: HybridWakeDetector? =
+        config.hybrid?.let { HybridWakeDetector(it, config.wakeWords, config.log, clock) }
 
     // Last among the fields its callbacks read: the wake detector may report unavailable while it is being created.
     private val detector: WakeDetector = WakeDetector(
@@ -107,6 +122,7 @@ class WakeMicEngine internal constructor(
         diagnostic = config.log,
         handoffCooldownMs = config.wakeHandoffCooldownMs,
         clock = clock,
+        onModelAdopted = { hybrid?.adoptModel(it) },
     )
 
     /**
@@ -140,7 +156,20 @@ class WakeMicEngine internal constructor(
      * Hot-swap wake words without restarting capture, from any thread. Forwarded to the wake detector, which owns the
      * current wake words and rebuilds its grammar on the model it has before the next frame it decodes.
      */
-    fun updateWakeWords(words: List<WakeWord>) = detector.updateWakeWords(words)
+    fun updateWakeWords(words: List<WakeWord>) {
+        detector.updateWakeWords(words)
+        hybrid?.updateWakeWords(words)
+    }
+
+    /**
+     * Someone said the wake phrase and nothing fired: save the last [HybridEvidence.MISS_AUDIO_MS] of audio to the
+     * hybrid's evidence as a [HybridEvidence.MissMark], at the next frame, from any thread. Logged and ignored without
+     * [WakeMicConfig.hybrid].
+     */
+    fun markMiss() {
+        val h = hybrid
+        if (h == null) config.log("miss mark ignored (no hybrid wake detector)") else h.markMiss()
+    }
 
     /**
      * Ends the capture request and yields the mic slot. Reports no capture loss, and cancels one already posted but

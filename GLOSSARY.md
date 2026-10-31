@@ -38,6 +38,26 @@ _Avoid_: fire cooldown, de-dupe window
 The most recent frames captured while the model is still loading, held so they can be replayed once it is ready.
 _Avoid_: flush buffer (replaying it is a "replay", not a "flush")
 
+**Hybrid wake detector**:
+A second wake detector for one wake id ("jarvis"), run by the engine beside the **wake detector** on the same frames. Its **gate** opens a **candidate**; the candidate wakes when the keyword spotter heard the wake keyword and no rival, or when the **window check** accepts it and the spotter heard no rival. Chosen at runtime against Vosk alone (the wake mode).
+_Avoid_: cascade, chain, two-stage detector
+
+**Gate**:
+The hybrid's always-on first check (openWakeWord), scoring every 80 ms; a score at the threshold opens a **candidate**.
+_Avoid_: stage 1
+
+**Candidate**:
+One utterance the **gate** opened: the ~2 s window ending 400 ms after it opened, which the hybrid's two checks decode.
+_Avoid_: trigger (a candidate that wakes is a wake)
+
+**Window check**:
+The production Vosk grammar and gates run on a **candidate**'s window alone, on a fresh **Decoder** of the shared **wake model**.
+_Avoid_: Vosk re-decode
+
+**Vosk shadow**:
+The **wake detector** kept decoding every frame while the hybrid decides, its wakes logged but not delivered, so each utterance has both verdicts and their disagreements are recorded.
+_Avoid_: parallel Vosk, A/B
+
 ### Capture
 
 **Capture request**:
